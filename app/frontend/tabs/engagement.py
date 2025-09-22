@@ -5,7 +5,8 @@ from __future__ import annotations
 import plotly.express as px
 import streamlit as st
 
-from app.frontend.common import CHART_TOOLTIPS, fetch, info_badge
+from common import CHART_TOOLTIPS, fetch, info_badge
+
 
 
 def render_engagement() -> None:

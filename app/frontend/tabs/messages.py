@@ -7,7 +7,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from app.frontend.common import CHART_TOOLTIPS, fetch, info_badge
+from common import CHART_TOOLTIPS, fetch, info_badge
+
 
 
 def render_messages() -> None:

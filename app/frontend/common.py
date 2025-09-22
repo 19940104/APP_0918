@@ -1,4 +1,4 @@
-"""Shared utilities and constants for the Streamlit dashboard."""
+"""Streamlit 儀表板的通用程式和常數"""
 
 from __future__ import annotations
 
@@ -10,8 +10,11 @@ from typing import Any
 import requests
 import streamlit as st
 
+
+# 後端 API 的基礎路徑，預設為本機端口，亦可透過環境變數 DASHBOARD_API 覆寫
 API_BASE = os.getenv("DASHBOARD_API", "http://localhost:8000/api/dashboard")
 
+# 儀表板總覽卡片的提示文字 (對應 KPI 指標)
 OVERVIEW_TOOLTIPS = {
     "每日活躍": "當日有使用的人數 ÷ 總員工數，用來追蹤每天的實際使用狀況。",
     "當週使用率": "全公司有使用過人數 ÷ 全公司總員工數，用於評估推廣覆蓋率。",
@@ -19,6 +22,7 @@ OVERVIEW_TOOLTIPS = {
     "當日訊息": "統計當日產生的訊息總數，用來評估互動熱度與系統負載。",
 }
 
+# 各圖表專用提示文字 (在頁面內不同圖表標題旁顯示 說明)
 CHART_TOOLTIPS = {
     "company_usage": "全公司有使用過人數 ÷ 總員工數，週別呈現以掌握推廣成效。",
     "department_usage": "各部門有使用過人數 ÷ 部門總員工數，辨識推廣強弱單位。",
@@ -33,17 +37,23 @@ CHART_TOOLTIPS = {
 }
 
 
+# =============================================================================
+# 資料存取工具 (Data Access Utilities)
+# =============================================================================
+
 @st.cache_data(ttl=300)
 def fetch(endpoint: str) -> Any:
-    """Call the backend API and cache the response for five minutes."""
+    """呼叫後端 API 並快取回應五分鐘"""
     url = f"{API_BASE}/{endpoint}"
     response = requests.get(url, timeout=30)
     response.raise_for_status()
     return response.json()
 
-
+# =============================================================================
+# UI 元件工具 (UI Utilities)
+# =============================================================================
 def info_badge(title: str, tooltip: str | None = None, *, font_size: str = "16px") -> str:
-    """Generate a title badge with an optional tooltip."""
+    """說明ICON"""
     safe_title = html.escape(title)
     if not tooltip:
         return f"<div style='font-size:{font_size}; font-weight:600;'>{safe_title}</div>"
@@ -55,8 +65,11 @@ def info_badge(title: str, tooltip: str | None = None, *, font_size: str = "16px
     )
 
 
+# =============================================================================
+# 格式化工具 (Formatting Utilities)
+# =============================================================================
 def format_metric_value(value: Any, suffix: str, multiplier: float = 1.0) -> str:
-    """Format KPI values (percentages are multiplied by 100 with two decimals)."""
+    """格式化 KPI 值（百分比乘以 100，保留兩位小數）"""
     if value is None or (isinstance(value, float) and (math.isnan(value) or math.isinf(value))):
         return "無資料"
     if isinstance(value, (int, float)):

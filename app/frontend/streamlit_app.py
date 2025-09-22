@@ -1,4 +1,23 @@
-"""Streamlit 儀表板原型。"""
+"""
+Streamlit 儀表板原型 (Main Entry Point)。
+
+此模組負責：
+1. 設定儀表板基本資訊 (標題、版面配置、樣式)。
+2. 引用共用工具 (common.py) 與分頁模組 (tabs)。
+3. 繪製首頁 KPI 總覽。
+4. 組裝四個主要分析分頁：
+   - 使用人數分析
+   - 訊息量分析
+   - 黏著度分析
+   - 啟用與留存
+
+結構設計：
+- 初始化設定：頁面配置、標題、樣式覆寫。
+- render_overview(): 繪製首頁 KPI 區塊 (每日活躍、週使用率、新人啟用率、當日訊息)。
+- 分頁組裝：引用 tabs 內的 render_xxx() 函式，將各子頁面插入主頁面。
+
+此模組是整個 Streamlit 儀表板的主框架。
+"""
 
 from __future__ import annotations
 
@@ -6,14 +25,19 @@ from datetime import datetime
 
 import streamlit as st
 
-from app.frontend.common import OVERVIEW_TOOLTIPS, fetch, format_metric_value, info_badge
-from app.frontend.tabs import (
-    render_activation,
-    render_engagement,
-    render_messages,
-    render_usage,
-)
+# 直接引用同層的 common.py
+from common import OVERVIEW_TOOLTIPS, fetch, format_metric_value, info_badge
 
+# 直接引用 tabs 資料夾裡的模組
+from tabs.activation import render_activation
+from tabs.engagement import render_engagement
+from tabs.messages import render_messages
+from tabs.usage import render_usage
+
+
+# =============================================================================
+# 頁面初始化 
+# =============================================================================
 st.set_page_config(
     page_title="APP 使用分析儀表板",
     page_icon=":bar_chart:",
@@ -24,7 +48,7 @@ st.set_page_config(
 st.title("APP 使用分析儀表板")
 st.caption("資料來源：DuckDB 彙總表")
 
-# ---- 全寬＆隱藏預設工具列 ----
+# ---- 自訂 CSS：全寬版面 & 隱藏 Streamlit 預設工具列 ----
 st.markdown(
     """
     <style>
@@ -43,6 +67,9 @@ st.markdown(
 )
 
 
+# =============================================================================
+# 首頁 KPI 總覽 
+# =============================================================================
 def render_overview() -> None:
     """繪製首頁 KPI。"""
     try:
@@ -76,7 +103,9 @@ def render_overview() -> None:
             st.metric(label=label, value=display)
 
 
-# ---- 頁面組裝 ----
+# =============================================================================
+# 分頁組裝
+# =============================================================================
 render_overview()
 
 usage_tab, message_tab, engagement_tab, activation_tab = st.tabs(
@@ -92,4 +121,7 @@ with engagement_tab:
 with activation_tab:
     render_activation()
 
+# =============================================================================
+# 更新時間
+# =============================================================================
 st.caption(f"最後更新：{datetime.now():%Y-%m-%d %H:%M:%S}")
