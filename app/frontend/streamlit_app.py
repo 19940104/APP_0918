@@ -319,9 +319,17 @@ def render_usage() -> None:
             lambda iso_val: iso_val[0] * 100 + iso_val[1] if isinstance(iso_val, tuple) else float("nan")
         )
         if "stat_date" in dept_df.columns:
-            dept_df.loc[dept_df["week_sort"].isna(), "week_sort"] = dept_df.loc[
-                dept_df["week_sort"].isna(), "stat_date"
-            ].map(lambda d: d.toordinal() if isinstance(d, pd.Timestamp) and not pd.isna(d) else float("nan"))
+            missing_week_sort_mask = dept_df["week_sort"].isna()
+            if missing_week_sort_mask.any():
+                ordinal_values = pd.to_numeric(
+                    dept_df.loc[missing_week_sort_mask, "stat_date"].map(
+                        lambda d: d.toordinal()
+                        if isinstance(d, pd.Timestamp) and not pd.isna(d)
+                        else float("nan")
+                    ),
+                    errors="coerce",
+                )
+                dept_df.loc[missing_week_sort_mask, "week_sort"] = ordinal_values
 
         week_options_df = (
             dept_df[["week_key", "week_display", "week_sort"]]
