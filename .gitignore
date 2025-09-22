@@ -1,0 +1,34 @@
+# 隱藏所有環境設定檔
+*.env
+.env/
+secrets/
+
+# 隱藏所有 YAML 設定檔
+*.yaml
+*.yml
+
+# 如果 config 目錄有敏感設定檔
+config/*.yaml
+config/*.yml
+config/settings.yaml
+
+# Python 相關
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# 虛擬環境
+.venv/
+venv/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# 系統檔案
+.DS_Store
+Thumbs.db
+
+
+
+__init__.py
