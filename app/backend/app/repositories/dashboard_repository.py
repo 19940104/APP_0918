@@ -67,7 +67,7 @@ class DashboardRepository:
 
         df = self.client.query_dataframe(
             """
-            SELECT stat_date, total_messages, active_users, avg_messages_per_user, total_installed\n            FROM message_aggregate_daily
+            SELECT stat_date, total_messages, active_users, avg_messages_per_user, total_employees\n            FROM message_aggregate_daily
             ORDER BY stat_date DESC
             LIMIT 1
             """
@@ -112,7 +112,7 @@ class DashboardRepository:
 
         df = self.client.query_dataframe(
             """
-            SELECT stat_date, total_messages, active_users, avg_messages_per_user, total_installed\n            FROM message_aggregate_daily
+            SELECT stat_date, total_messages, active_users, avg_messages_per_user, total_employees\n            FROM message_aggregate_daily
             ORDER BY stat_date
             """
         )
@@ -159,11 +159,19 @@ class DashboardRepository:
             SELECT stat_month, unit_id, unit_name, retained_users, retention_rate\n            FROM activation_monthly\n            WHERE unit_id IS NOT NULL\n            ORDER BY stat_month, unit_id
             """
         )
-        return self._to_records(df)
-
-
-
-
-
-
-
+        return self._to_records(df)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

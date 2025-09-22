@@ -176,6 +176,19 @@ class UsageStatsPipeline(BasePipeline):
                 "RootUnitName": "root_unit_name",
             }
         )
+        if "emp_id" not in employees.columns and "EmpNo" in employees.columns:
+            employees.rename(columns={"EmpNo": "emp_id"}, inplace=True)
+        required_employee_columns = {
+            "emp_id": pd.NA,
+            "unit_id": pd.NA,
+            "out_date": pd.NA,
+            "unit_name": pd.NA,
+            "root_unit_id": pd.NA,
+            "root_unit_name": pd.NA,
+        }
+        for column_name, default_value in required_employee_columns.items():
+            if column_name not in employees.columns:
+                employees[column_name] = default_value
         employees["unit_name"].fillna("\u672a\u5b9a\u7fa9", inplace=True)
         employees["root_unit_name"].fillna(employees["unit_name"], inplace=True)
         employees["agg_unit_id"] = employees["root_unit_id"].where(
@@ -189,6 +202,8 @@ class UsageStatsPipeline(BasePipeline):
         daily_active = raw_items["daily_active"].rename(
             columns={"ActiveDate": "active_date", "UnitId": "unit_id", "EmpId": "emp_id"}
         )
+        if "emp_id" not in daily_active.columns and "EmpNo" in daily_active.columns:
+            daily_active.rename(columns={"EmpNo": "emp_id"}, inplace=True)
         messages = raw_items["messages"].rename(
             columns={
                 "MsgDate": "stat_date",
@@ -197,9 +212,16 @@ class UsageStatsPipeline(BasePipeline):
                 "MessageCount": "message_count",
             }
         )
+        if "emp_id" not in messages.columns:
+            for fallback_col in ("SenderEmpNo", "SenderEmpId", "SendEmpid"):
+                if fallback_col in messages.columns:
+                    messages.rename(columns={fallback_col: "emp_id"}, inplace=True)
+                    break
         device = raw_items["device"].rename(
             columns={"EmpId": "emp_id", "FirstInstallDate": "first_install_date"}
         )
+        if "emp_id" not in device.columns and "EmpNo" in device.columns:
+            device.rename(columns={"EmpNo": "emp_id"}, inplace=True)
 
         daily_active["active_date"] = pd.to_datetime(daily_active["active_date"], errors="coerce")
         messages["stat_date"] = pd.to_datetime(messages["stat_date"], errors="coerce")
@@ -352,7 +374,7 @@ class UsageStatsPipeline(BasePipeline):
             message_daily["total_messages"] / message_daily["active_users"].replace({0: pd.NA})
         )
         message_daily["avg_messages_per_user"] = message_daily["avg_messages_per_user"].fillna(0.0).astype(float)
-        message_daily["total_installed"] = installed_total
+        message_daily["total_employees"] = installed_total
 
         messages["unit_name"].fillna("\u672a\u5b9a\u7fa9", inplace=True)
         message_user_daily = messages.groupby(["stat_date", "emp_id", "unit_id"], dropna=False).agg(
@@ -541,7 +563,7 @@ class UsageStatsPipeline(BasePipeline):
                 total_messages INTEGER,
                 active_users INTEGER,
                 avg_messages_per_user DOUBLE,
-                total_installed INTEGER
+                total_employees INTEGER
             )
             """
         )

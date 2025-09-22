@@ -31,7 +31,8 @@ SCHEMA_STATEMENTS: Iterable[str] = (
         stat_date DATE,
         total_messages INTEGER,
         active_users INTEGER,
-        avg_messages_per_user DOUBLE
+        avg_messages_per_user DOUBLE,
+        total_employees INTEGER
     )
     """,
     """

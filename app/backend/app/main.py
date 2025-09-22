@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.backend.app.api.routes import api_router
+from app.backend.app.api.routes.dashboard import router as dashboard_router
 from app.backend.app.core.config import get_app_settings
 
 
@@ -22,7 +22,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    app.include_router(api_router, prefix=settings.api.prefix)
+    app.include_router(dashboard_router, prefix=settings.api.prefix)
 
     @app.get("/health", tags=["system"])
     def health_check() -> dict[str, str]:

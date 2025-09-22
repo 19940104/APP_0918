@@ -9,6 +9,7 @@ from datetime import datetime
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 
@@ -64,8 +65,9 @@ CHART_TOOLTIPS = {
     "department_usage": "各部門有使用過人數 ÷ 部門總員工數，辨識推廣強弱單位。",
     "daily_active": "當日有使用的人數 ÷ 總員工數，快速掌握每日黏著度。",
     "weekly_active": "當週有使用的人數 ÷ 總員工數，觀察每週活躍趨勢穩定度。",
-    "message_trend": "每日訊息總數，觀察整體訊息量趨勢並評估系統負載。",
-    "message_distribution": "20/60/20 分布，判斷訊息是否集中在少數人。",
+    "workday_messages": "僅統計工作日訊息總數，可切換逐日或逐週平均，掌握系統熱度與負載走勢。",
+    "per_capita_messages": "工作日訊息總數除以在職員工數，評估人均互動深度。",
+    "message_distribution": "以前 20% / 中間 60% / 後 20% 分層彙總訊息占比，判斷是否集中在少數人。",
     "message_leaderboard": "訊息量排名前 10 的使用者，協助了解核心使用者。",
     "activation": "啟用率：到職後有使用過的人數比例，評估部署覆蓋。",
     "retention": "留存率：已啟用者在當月至少使用一次的比例，評估持續使用狀況。",
@@ -167,6 +169,9 @@ def render_usage() -> None:
                 company_df["week_display"] = company_df["week_display"].fillna(
                     company_df["stat_date"].dt.strftime("%G-W%V")
                 )
+                company_df["stat_month"] = company_df["stat_date"].dt.to_period("M")
+            else:
+                company_df["stat_month"] = pd.Series([pd.NaT] * len(company_df))
             company_df["week_display"] = company_df["week_display"].fillna(
                 company_df.index.to_series().add(1).map(lambda idx: f"週次 {idx}")
             )
@@ -174,127 +179,340 @@ def render_usage() -> None:
             company_df["usage_rate_display"] = company_df["usage_rate"].apply(
                 lambda v: f"{v:.1%}" if pd.notna(v) else "無資料"
             )
+            month_options: list[str] = []
+            if "stat_month" in company_df.columns:
+                unique_months = company_df["stat_month"].dropna().unique()
+                if len(unique_months) > 0:
+                    month_options = sorted([str(month) for month in unique_months], reverse=True)
 
             with cols[0]:
                 st.markdown(
                     info_badge("全公司週使用率", CHART_TOOLTIPS.get("company_usage"), font_size="18px"),
                     unsafe_allow_html=True,
                 )
-                fig = px.bar(
-                    company_df,
-                    x="week_display",
-                    y="usage_rate",
-                    text="usage_rate_display",
-                    hover_data={
-                        "usage_rate_display": True,
-                        "active_users": True,
-                        "total_users": True,
-                    },
-                    labels={"week_display": "ISO 週次", "usage_rate": "使用率"},
-                )
-                fig.update_traces(textposition="outside")
-                fig.update_layout(title=None, xaxis_title="ISO 週次", yaxis_title="使用率 (%)")
-                fig.update_yaxes(tickformat=".0%")
-
-                st.plotly_chart(
-                    fig,
-                    use_container_width=True,
-                    config={"modeBarButtonsToKeep": ["toImage", "pan2d", "toggleFullscreen"], "displaylogo": False},
-                )
-
-                summary_cols = [
-                    col for col in ["week_display", "active_users", "total_users", "usage_rate_display"]
-                    if col in company_df.columns
-                ]
-                if summary_cols:
-                    summary_df = company_df[summary_cols].rename(
-                        columns={
-                            "week_display": "週次",
-                            "active_users": "本週使用人數",
-                            "total_users": "全公司總員工數",
-                            "usage_rate_display": "使用率",
-                        }
+                display_df = company_df
+                if month_options:
+                    selected_month = st.selectbox(
+                        "選擇月份檢視週使用率",
+                        month_options,
+                        index=0,
+                        key="company_usage_month",
                     )
-                    st.dataframe(summary_df, use_container_width=True)
+                    display_df = company_df[company_df["stat_month"].astype(str) == selected_month]
+                if display_df.empty:
+                    st.info("所選月份沒有週使用率資料。")
+                else:
+                    display_df = display_df.sort_values(sort_keys) if sort_keys else display_df
+                    fig = px.bar(
+                        display_df,
+                        x="week_display",
+                        y="usage_rate",
+                        text="usage_rate_display",
+                        hover_data={
+                            "usage_rate_display": True,
+                            "active_users": True,
+                            "total_users": True,
+                        },
+                        labels={"week_display": "ISO 週次", "usage_rate": "使用率"},
+                    )
+                    fig.update_traces(textposition="outside")
+                    fig.update_layout(title=None, xaxis_title="ISO 週次", yaxis_title="使用率 (%)")
+                    fig.update_yaxes(tickformat=".0%")
+
+                    st.plotly_chart(
+                        fig,
+                        use_container_width=True,
+                        config={"modeBarButtonsToKeep": ["toImage", "pan2d", "toggleFullscreen"], "displaylogo": False},
+                    )
+
+                    summary_cols = [
+                        col for col in ["week_display", "active_users", "total_users", "usage_rate_display"]
+                        if col in display_df.columns
+                    ]
+                    if summary_cols:
+                        summary_df = display_df[summary_cols].rename(
+                            columns={
+                                "week_display": "週次",
+                                "active_users": "本週使用人數",
+                                "total_users": "全公司總員工數",
+                                "usage_rate_display": "使用率",
+                            }
+                        )
+                        st.dataframe(summary_df, use_container_width=True)
     # 各部門週使用率 + 月度排行
-    if departments:
+    dept_df = pd.DataFrame(departments) if isinstance(departments, list) else pd.DataFrame()
+
+    if dept_df.empty:
+        with cols[1]:
+            st.info("各部門週使用率沒有資料。")
+    else:
+        dept_df = dept_df.copy()
+        if "stat_date" in dept_df.columns:
+            dept_df["stat_date"] = pd.to_datetime(dept_df["stat_date"], errors="coerce")
+        for col in ["usage_rate", "active_users", "total_users", "iso_year", "iso_week"]:
+            if col in dept_df.columns:
+                dept_df[col] = pd.to_numeric(dept_df[col], errors="coerce")
+
+        def _build_unit_label(row: pd.Series) -> str:
+            unit_id = row.get("unit_id")
+            unit_name = row.get("unit_name")
+            parts: list[str] = []
+            if isinstance(unit_id, str) and unit_id.strip():
+                parts.append(unit_id.strip())
+            elif pd.notna(unit_id):
+                parts.append(str(unit_id))
+            if isinstance(unit_name, str) and unit_name.strip():
+                parts.append(unit_name.strip())
+            elif pd.notna(unit_name):
+                parts.append(str(unit_name))
+            return " ".join(parts) if parts else "未命名單位"
+
+        dept_df["unit_label"] = dept_df.apply(_build_unit_label, axis=1)
+
+        def _derive_iso_tuple(row: pd.Series) -> tuple[int, int] | None:
+            year = row.get("iso_year")
+            week = row.get("iso_week")
+            try:
+                if pd.notna(year) and pd.notna(week):
+                    return int(year), int(week)
+            except (TypeError, ValueError):
+                pass
+            stat_date = row.get("stat_date")
+            if isinstance(stat_date, pd.Timestamp) and not pd.isna(stat_date):
+                iso = stat_date.isocalendar()
+                return int(iso.year), int(iso.week)
+            return None
+
+        dept_df["iso_tuple"] = dept_df.apply(_derive_iso_tuple, axis=1)
+
+        def _make_week_display(row: pd.Series) -> str:
+            label = row.get("week_label")
+            if isinstance(label, str) and label.strip():
+                return label.strip()
+            iso_tuple = row.get("iso_tuple")
+            if isinstance(iso_tuple, tuple):
+                year, week = iso_tuple
+                return f"{year}-W{week:02d}"
+            stat_date = row.get("stat_date")
+            if isinstance(stat_date, pd.Timestamp) and not pd.isna(stat_date):
+                return stat_date.strftime("%G-W%V")
+            return "未知週次"
+
+        dept_df["week_display"] = dept_df.apply(_make_week_display, axis=1)
+
+        def _make_week_key(row: pd.Series) -> str:
+            iso_tuple = row.get("iso_tuple")
+            if isinstance(iso_tuple, tuple):
+                year, week = iso_tuple
+                return f"{year:04d}-W{week:02d}"
+            display = row.get("week_display")
+            if isinstance(display, str) and display.strip():
+                return display
+            stat_date = row.get("stat_date")
+            if isinstance(stat_date, pd.Timestamp) and not pd.isna(stat_date):
+                iso = stat_date.isocalendar()
+                return f"{int(iso.year):04d}-W{int(iso.week):02d}"
+            return f"week-{row.name}"
+
+        dept_df["week_key"] = dept_df.apply(_make_week_key, axis=1)
+        dept_df["week_sort"] = dept_df["iso_tuple"].apply(
+            lambda iso_val: iso_val[0] * 100 + iso_val[1] if isinstance(iso_val, tuple) else float("nan")
+        )
+        if "stat_date" in dept_df.columns:
+            dept_df.loc[dept_df["week_sort"].isna(), "week_sort"] = dept_df.loc[
+                dept_df["week_sort"].isna(), "stat_date"
+            ].map(lambda d: d.toordinal() if isinstance(d, pd.Timestamp) and not pd.isna(d) else float("nan"))
+
+        week_options_df = (
+            dept_df[["week_key", "week_display", "week_sort"]]
+            .drop_duplicates()
+            .sort_values(by=["week_sort", "week_display"], ascending=[False, True], na_position="last")
+        )
+        week_records = week_options_df.to_dict("records")
+        week_labels = {rec["week_key"]: rec.get("week_display") or rec["week_key"] for rec in week_records}
+
         with cols[1]:
             st.markdown(
                 info_badge("各部門週使用率", CHART_TOOLTIPS.get("department_usage"), font_size="18px"),
                 unsafe_allow_html=True,
             )
-            fig = px.line(
-                departments,
-                x="stat_date",
-                y="usage_rate",
-                color="unit_name",
-                labels={"stat_date": "統計日期", "usage_rate": "使用率", "unit_name": "部門"},
-            )
-            fig.update_layout(title=None, xaxis_title="統計日期", yaxis_title="使用率 (%)")
-            fig.update_yaxes(tickformat=".0%")
-            st.plotly_chart(
-                fig,
-                use_container_width=True,
-                config={"modeBarButtonsToKeep": ["toImage", "pan2d", "toggleFullscreen"], "displaylogo": False},
-            )
+
+            if not week_records:
+                st.info("部門資料缺少週次資訊，無法顯示週別使用狀況。")
+            else:
+                default_index = 0
+                selected_week = st.selectbox(
+                    "選擇週次",
+                    options=[rec["week_key"] for rec in week_records],
+                    index=default_index,
+                    key="department_usage_week",
+                    format_func=lambda key: week_labels.get(key, key),
+                )
+
+                week_df = dept_df.loc[dept_df["week_key"] == selected_week].copy()
+                if week_df.empty:
+                    st.info("所選週次沒有部門使用率資料。")
+                else:
+                    chart_type = st.radio(
+                        "圖表類型",
+                        ("圓餅圖", "長條圖"),
+                        horizontal=True,
+                        key="department_usage_chart_type",
+                    )
+
+                    chart_df = week_df.dropna(subset=["usage_rate"]).copy()
+                    chart_df["usage_rate_pct"] = chart_df["usage_rate"] * 100
+                    chart_df["usage_rate_label"] = chart_df["usage_rate_pct"].map(
+                        lambda v: f"{v:.2f}%" if pd.notna(v) else "無資料"
+                    )
+
+                    if chart_df.empty:
+                        st.info("所選週次缺少啟用率資料，無法繪製圖表。")
+                    else:
+                        chart_labels = {
+                            "unit_label": "單位",
+                            "usage_rate_pct": "啟用率 (%)",
+                            "usage_rate_label": "啟用率",
+                            "active_users": "使用人數",
+                            "total_users": "總人數",
+                        }
+
+                        hover_data = {
+                            key: True
+                            for key in ["usage_rate_label", "active_users", "total_users"]
+                            if key in chart_df.columns
+                        }
+
+                        if chart_type == "圓餅圖":
+                            fig = px.pie(
+                                chart_df,
+                                names="unit_label",
+                                values="usage_rate_pct",
+                                hover_data=hover_data,
+                                labels=chart_labels,
+                            )
+                            fig.update_traces(texttemplate="%{label}<br>%{value:.2f}%", textposition="inside")
+                            fig.update_layout(legend_title_text="單位")
+                        else:
+                            chart_df = chart_df.sort_values("usage_rate_pct", ascending=False)
+                            fig = px.bar(
+                                chart_df,
+                                x="unit_label",
+                                y="usage_rate_pct",
+                                text="usage_rate_label",
+                                hover_data=hover_data,
+                                labels=chart_labels,
+                            )
+                            fig.update_traces(textposition="outside")
+                            fig.update_layout(
+                                xaxis_title="單位",
+                                yaxis_title="啟用率 (%)",
+                                xaxis_tickangle=-30,
+                            )
+
+                        st.plotly_chart(
+                            fig,
+                            use_container_width=True,
+                            config={"modeBarButtonsToKeep": ["toImage", "pan2d", "toggleFullscreen"], "displaylogo": False},
+                        )
+
+                    st.caption(f"週次：{week_labels.get(selected_week, selected_week)}")
+
+                    table_df = week_df.copy()
+                    if "usage_rate" in table_df.columns:
+                        table_df["usage_rate_pct"] = table_df["usage_rate"] * 100
+                        table_df["usage_rate_label"] = table_df["usage_rate_pct"].map(
+                            lambda v: f"{v:.2f}%" if pd.notna(v) else "無資料"
+                        )
+                    for col in ["active_users", "total_users"]:
+                        if col in table_df.columns:
+                            table_df[col] = pd.to_numeric(table_df[col], errors="coerce").astype("Int64")
+                    display_cols = []
+                    rename_map = {}
+                    if "unit_id" in table_df.columns:
+                        display_cols.append("unit_id")
+                        rename_map["unit_id"] = "處級代碼"
+                    if "unit_name" in table_df.columns:
+                        display_cols.append("unit_name")
+                        rename_map["unit_name"] = "處級名稱"
+                    if "total_users" in table_df.columns:
+                        display_cols.append("total_users")
+                        rename_map["total_users"] = "總人數"
+                    if "active_users" in table_df.columns:
+                        display_cols.append("active_users")
+                        rename_map["active_users"] = "使用人數"
+                    if "usage_rate_label" in table_df.columns:
+                        display_cols.append("usage_rate_label")
+                        rename_map["usage_rate_label"] = "啟用率百分比"
+
+                    if display_cols:
+                        table_df = table_df.sort_values("usage_rate", ascending=False, na_position="last")
+                        st.dataframe(
+                            table_df[display_cols].rename(columns=rename_map),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
 
         # --- 月度平均使用率排行（依 unit_name 或 scope_id 彈性分組） ---
-        dept_df = pd.DataFrame(departments)
-        if not dept_df.empty and "stat_date" in dept_df.columns:
-            dept_df = dept_df.copy()
-            dept_df["stat_date"] = pd.to_datetime(dept_df["stat_date"], errors="coerce")
-            dept_df = dept_df.dropna(subset=["stat_date"])
-            if not dept_df.empty:
-                dept_df["stat_month_label"] = dept_df["stat_date"].dt.to_period("M").astype(str)
-                month_options = sorted(dept_df["stat_month_label"].dropna().unique(), reverse=True)
-                if month_options:
-                    selected_month = st.selectbox("選擇月份檢視部門平均使用率排行", month_options, index=0, key="department_usage_month")
+        # if "stat_date" in dept_df.columns:
+        #     month_df = dept_df.dropna(subset=["stat_date"]).copy()
+        #     if not month_df.empty:
+        #         month_df["stat_month_label"] = month_df["stat_date"].dt.to_period("M").astype(str)
+        #         month_options = sorted(month_df["stat_month_label"].dropna().unique(), reverse=True)
+        #         if month_options:
+        #             selected_month = st.selectbox(
+        #                 "選擇月份檢視部門平均使用率排行",
+        #                 month_options,
+        #                 index=0,
+        #                 key="department_usage_month",
+        #             )
 
-                    month_df = dept_df.loc[dept_df["stat_month_label"] == selected_month]
-                    if month_df.empty:
-                        st.info("所選月份沒有部門使用率資料。")
-                    elif "usage_rate" not in month_df.columns:
-                        st.info("部門資料缺少使用率欄位，無法顯示月度排行。")
-                    else:
-                        group_cols = [c for c in ["unit_name", "scope_id", "unit_id"] if c in month_df.columns]
-                        if not group_cols:
-                            st.info("部門資料缺少可分組欄位（unit_name / scope_id / unit_id）。")
-                        else:
-                            summary = (
-                                month_df.groupby(group_cols, as_index=False)["usage_rate"].mean()
-                            )
-                            if summary.empty:
-                                st.info("所選月份沒有有效的部門使用率資料。")
-                            else:
-                                # 產生顯示用標籤
-                                label_col = "unit_name" if "unit_name" in summary.columns else group_cols[0]
-                                summary["unit_label"] = summary[label_col].astype(str)
-                                summary = summary.sort_values("usage_rate", ascending=False)
+        #             month_filtered = month_df.loc[month_df["stat_month_label"] == selected_month]
+        #             if month_filtered.empty:
+        #                 st.info("所選月份沒有部門使用率資料。")
+        #             elif "usage_rate" not in month_filtered.columns:
+        #                 st.info("部門資料缺少使用率欄位，無法顯示月度排行。")
+        #             else:
+        #                 group_cols = [c for c in ["unit_name", "scope_id", "unit_id"] if c in month_filtered.columns]
+        #                 if not group_cols:
+        #                     st.info("部門資料缺少可分組欄位（unit_name / scope_id / unit_id）。")
+        #                 else:
+        #                     summary = month_filtered.groupby(group_cols, as_index=False)["usage_rate"].mean()
+        #                     if summary.empty:
+        #                         st.info("所選月份沒有有效的部門使用率資料。")
+        #                     else:
+        #                         label_col = "unit_name" if "unit_name" in summary.columns else group_cols[0]
+        #                         summary["unit_label"] = summary[label_col].astype(str)
+        #                         summary = summary.sort_values("usage_rate", ascending=False)
 
-                                st.markdown(
-                                    info_badge(f"各部門月使用率（{selected_month}）", CHART_TOOLTIPS.get("department_usage"), font_size="18px"),
-                                    unsafe_allow_html=True,
-                                )
-                                fig_bar = px.bar(
-                                    summary,
-                                    x="unit_label",
-                                    y="usage_rate",
-                                    labels={"unit_label": "單位", "usage_rate": "使用率"},
-                                )
-                                fig_bar.update_layout(title=None, xaxis_title="單位", yaxis_title="使用率 (%)")
-                                fig_bar.update_yaxes(tickformat=".0%")
-                                fig_bar.update_traces(texttemplate="%{y:.1%}", textposition="outside")
-                                st.plotly_chart(
-                                    fig_bar,
-                                    use_container_width=True,
-                                    config={"modeBarButtonsToKeep": ["toImage", "pan2d", "toggleFullscreen"], "displaylogo": False},
-                                )
-                else:
-                    st.info("沒有可供選擇的月份。")
-            else:
-                st.info("部門資料沒有有效日期，無法提供月度檢視。")
-        else:
-            st.info("無法建立部門月度排行（缺少 stat_date 欄位或資料為空）。")
+        #                         st.markdown(
+        #                             info_badge(
+        #                                 f"各部門月使用率（{selected_month}）",
+        #                                 CHART_TOOLTIPS.get("department_usage"),
+        #                                 font_size="18px",
+        #                             ),
+        #                             unsafe_allow_html=True,
+        #                         )
+        #                         fig_bar = px.bar(
+        #                             summary,
+        #                             x="unit_label",
+        #                             y="usage_rate",
+        #                             labels={"unit_label": "單位", "usage_rate": "使用率"},
+        #                         )
+        #                         fig_bar.update_layout(title=None, xaxis_title="單位", yaxis_title="使用率 (%)")
+        #                         fig_bar.update_yaxes(tickformat=".0%")
+        #                         fig_bar.update_traces(texttemplate="%{y:.1%}", textposition="outside")
+        #                         st.plotly_chart(
+        #                             fig_bar,
+        #                             use_container_width=True,
+        #                             config={"modeBarButtonsToKeep": ["toImage", "pan2d", "toggleFullscreen"], "displaylogo": False},
+        #                         )
+        #         else:
+        #             st.info("沒有可供選擇的月份。")
+        #     else:
+        #         st.info("部門資料沒有有效日期，無法提供月度檢視。")
+        # else:
+        #     st.info("無法建立部門月度排行（缺少 stat_date 欄位或資料為空）。")
 
 
 def render_engagement() -> None:
@@ -364,56 +582,263 @@ def render_messages() -> None:
         st.error(f"取得訊息量資料失敗：{e}")
         return
 
-    trend = data.get("trend", [])
-    dist = data.get("distribution", [])
+    trend_data = data.get("trend", [])
+    distribution_data = data.get("distribution", [])
     leaderboard = data.get("leaderboard", [])
 
-    if not trend and not dist and not leaderboard:
+    if not trend_data and not distribution_data and not leaderboard:
         st.info("目前沒有訊息量相關資料。")
         return
 
-    cols = st.columns(2, gap="large")
+    trend_df = pd.DataFrame(trend_data) if isinstance(trend_data, list) else pd.DataFrame()
+    if not trend_df.empty:
+        trend_df = trend_df.copy()
+        if "stat_date" in trend_df.columns:
+            trend_df["stat_date"] = pd.to_datetime(trend_df["stat_date"], errors="coerce")
+            trend_df = trend_df.dropna(subset=["stat_date"]).sort_values("stat_date")
+        if "total_employees" not in trend_df.columns and "total_installed" in trend_df.columns:
+            trend_df["total_employees"] = trend_df["total_installed"]
 
-    if trend:
-        with cols[0]:
-            st.markdown(
-                info_badge("訊息量趨勢", CHART_TOOLTIPS.get("message_trend"), font_size="18px"),
-                unsafe_allow_html=True,
-            )
-            fig = px.bar(
-                trend,
-                x="stat_date",
-                y="total_messages",
-                labels={"stat_date": "統計日期", "total_messages": "訊息數"},
-            )
-            fig.update_layout(title=None, xaxis_title="統計日期", yaxis_title="訊息數 (則)")
-            st.plotly_chart(
-                fig,
-                use_container_width=True,
-                config={"modeBarButtonsToKeep": ["toImage", "pan2d", "toggleFullscreen"], "displaylogo": False},
-            )
+    workday_df = (
+        trend_df.loc[trend_df["stat_date"].dt.weekday < 5].copy()
+        if not trend_df.empty
+        else pd.DataFrame()
+    )
 
-    if dist:
-        target_col = cols[1 if trend else 0]
-        with target_col:
-            st.markdown(
-                info_badge("20/60/20 訊息分布", CHART_TOOLTIPS.get("message_distribution"), font_size="18px"),
-                unsafe_allow_html=True,
+    show_workday_trend = not workday_df.empty
+    show_per_capita = (
+        show_workday_trend
+        and "total_employees" in workday_df.columns
+        and workday_df["total_employees"].fillna(0).gt(0).any()
+    )
+
+    chart_count = int(show_workday_trend) + int(show_per_capita)
+    if chart_count:
+        cols = st.columns(chart_count, gap="large") if chart_count > 1 else st.columns(1, gap="large")
+        col_index = 0
+
+        if show_workday_trend:
+            with cols[col_index]:
+                st.markdown(
+                    info_badge("工作日平均訊息數", CHART_TOOLTIPS.get("workday_messages"), font_size="18px"),
+                    unsafe_allow_html=True,
+                )
+                granularity = st.radio(
+                    "顯示粒度",
+                    ["逐日", "逐週"],
+                    horizontal=True,
+                    key="workday_message_granularity",
+                )
+                fig = None
+                if granularity == "逐日":
+                    daily_df = workday_df[["stat_date", "total_messages"]].copy()
+                    daily_df.sort_values("stat_date", inplace=True)
+                    if daily_df.empty:
+                        st.info("目前沒有可用的工作日訊息資料。")
+                    else:
+                        fig = go.Figure()
+                        fig.add_trace(
+                            go.Scatter(
+                                x=daily_df["stat_date"],
+                                y=daily_df["total_messages"],
+                                mode="lines+markers",
+                                name="訊息數",
+                                hovertemplate="日期=%{x|%Y-%m-%d}<br>訊息數=%{y:,.0f} 則<extra></extra>",
+                            )
+                        )
+                        fig.update_layout(
+                            title=None,
+                            xaxis_title="統計日期",
+                            yaxis_title="訊息數 (則)",
+                        )
+                else:
+                    weekly_df = (
+                        workday_df.set_index("stat_date")
+                        .resample("W-FRI")
+                        .agg(avg_messages=("total_messages", "mean"), workdays=("total_messages", "count"))
+                        .reset_index()
+                    )
+                    weekly_df = weekly_df[weekly_df["workdays"] > 0]
+                    if weekly_df.empty:
+                        st.info("資料不足以產生逐週視圖。")
+                    else:
+                        weekly_df.sort_values("stat_date", inplace=True)
+                        weekly_df["week_label"] = weekly_df["stat_date"].dt.strftime("%G-W%V")
+                        fig = go.Figure()
+                        fig.add_trace(
+                            go.Scatter(
+                                x=weekly_df["stat_date"],
+                                y=weekly_df["avg_messages"],
+                                mode="lines+markers",
+                                name="平均訊息數",
+                                customdata=weekly_df[["week_label", "workdays"]].to_numpy(),
+                                hovertemplate=(
+                                    "週別=%{customdata[0]}<br>"
+                                    "平均訊息數=%{y:,.2f} 則<br>"
+                                    "工作日數=%{customdata[1]} 天<extra></extra>"
+                                ),
+                            )
+                        )
+                        fig.update_layout(
+                            title=None,
+                            xaxis_title="週結束日期",
+                            yaxis_title="平均訊息數 (則)",
+                        )
+                        fig.update_xaxes(tickformat="%Y-%m-%d")
+
+                if fig:
+                    fig.update_layout(legend_title_text=None)
+                    st.plotly_chart(
+                        fig,
+                        use_container_width=True,
+                        config={
+                            "modeBarButtonsToKeep": ["toImage", "pan2d", "toggleFullscreen"],
+                            "displaylogo": False,
+                        },
+                    )
+            col_index += 1
+
+        if show_per_capita:
+            target_col = cols[col_index if chart_count > 1 else 0]
+            with target_col:
+                st.markdown(
+                    info_badge("工作日人均訊息數", CHART_TOOLTIPS.get("per_capita_messages"), font_size="18px"),
+                    unsafe_allow_html=True,
+                )
+                per_capita_df = workday_df.copy()
+                per_capita_df.sort_values("stat_date", inplace=True)
+                per_capita_df["total_employees"] = per_capita_df["total_employees"].replace({0: pd.NA})
+                per_capita_df["messages_per_employee"] = (
+                    per_capita_df["total_messages"] / per_capita_df["total_employees"]
+                )
+                per_capita_df = per_capita_df.dropna(subset=["messages_per_employee"])
+                if per_capita_df.empty:
+                    st.info("目前沒有足夠的資料計算人均訊息數。")
+                else:
+                    per_capita_df["messages_per_employee"] = per_capita_df["messages_per_employee"].astype(float)
+                    fig = go.Figure()
+                    customdata = per_capita_df[["total_messages", "total_employees"]].to_numpy()
+                    fig.add_trace(
+                        go.Bar(
+                            x=per_capita_df["stat_date"],
+                            y=per_capita_df["messages_per_employee"],
+                            name="人均訊息數",
+                            customdata=customdata,
+                            hovertemplate=(
+                                "日期=%{x|%Y-%m-%d}<br>"
+                                "人均訊息數=%{y:,.2f} 則<br>"
+                                "訊息總數=%{customdata[0]:,.0f} 則<br>"
+                                "在職員工=%{customdata[1]:,.0f} 人<extra></extra>"
+                            ),
+                        )
+                    )
+                    fig.add_trace(
+                        go.Scatter(
+                            x=per_capita_df["stat_date"],
+                            y=per_capita_df["messages_per_employee"],
+                            mode="lines+markers",
+                            name="趨勢線",
+                            line=dict(color="#ff7f0e"),
+                            hoverinfo="skip",
+                        )
+                    )
+                    fig.update_layout(
+                        title=None,
+                        xaxis_title="統計日期",
+                        yaxis_title="人均訊息數 (則)",
+                        legend_title_text=None,
+                    )
+                    fig.update_yaxes(tickformat=".2f")
+                    st.plotly_chart(
+                        fig,
+                        use_container_width=True,
+                        config={
+                            "modeBarButtonsToKeep": ["toImage", "pan2d", "toggleFullscreen"],
+                            "displaylogo": False,
+                        },
+                    )
+
+    if distribution_data:
+        dist_df = pd.DataFrame(distribution_data)
+        if not dist_df.empty and "stat_date" in dist_df.columns:
+            dist_df = dist_df.copy()
+            dist_df["stat_date"] = pd.to_datetime(dist_df["stat_date"], errors="coerce")
+            dist_df = dist_df.dropna(subset=["stat_date"]).sort_values(["stat_date", "segment"])
+        else:
+            dist_df = pd.DataFrame()
+
+        st.markdown(
+            info_badge("20/60/20 訊息分布", CHART_TOOLTIPS.get("message_distribution"), font_size="18px"),
+            unsafe_allow_html=True,
+        )
+
+        if dist_df.empty:
+            st.info("目前沒有足夠的訊息分布資料。")
+        else:
+            if not trend_df.empty and "total_messages" in trend_df.columns:
+                totals_map = trend_df.set_index("stat_date")["total_messages"]
+                dist_df["total_messages"] = dist_df["stat_date"].map(totals_map).fillna(0.0)
+            else:
+                dist_df["total_messages"] = 0.0
+            dist_df["message_share"] = dist_df["message_share"].fillna(0.0)
+            dist_df["message_count"] = dist_df["message_share"] * dist_df["total_messages"]
+            dist_df["stat_month"] = dist_df["stat_date"].dt.to_period("M")
+
+            segment_order = ["前20%", "中間60%", "後20%"]
+            monthly_counts = (
+                dist_df.groupby(["stat_month", "segment"], as_index=False)["message_count"].sum()
             )
-            fig = px.area(
-                dist,
-                x="stat_date",
-                y="message_share",
-                color="segment",
-                labels={"stat_date": "統計日期", "message_share": "訊息占比", "segment": "族群"},
+            daily_totals = (
+                dist_df[["stat_month", "stat_date", "total_messages"]]
+                .drop_duplicates(subset=["stat_date"])
+                .groupby("stat_month", as_index=False)["total_messages"].sum()
+                .rename(columns={"total_messages": "month_total_messages"})
             )
-            fig.update_yaxes(tickformat=".0%")
-            fig.update_layout(title=None, xaxis_title="統計日期", yaxis_title="訊息占比 (%)")
-            st.plotly_chart(
-                fig,
-                use_container_width=True,
-                config={"modeBarButtonsToKeep": ["toImage", "pan2d", "toggleFullscreen"], "displaylogo": False},
-            )
+            monthly_distribution = monthly_counts.merge(daily_totals, on="stat_month", how="left")
+            monthly_distribution = monthly_distribution[monthly_distribution["month_total_messages"] > 0]
+
+            if monthly_distribution.empty:
+                st.info("目前沒有足夠的訊息分布資料。")
+            else:
+                monthly_distribution["message_share"] = (
+                    monthly_distribution["message_count"] / monthly_distribution["month_total_messages"]
+                )
+                monthly_distribution["month_label"] = monthly_distribution["stat_month"].dt.strftime("%Y-%m")
+                monthly_distribution["segment"] = pd.Categorical(
+                    monthly_distribution["segment"],
+                    categories=segment_order,
+                    ordered=True,
+                )
+                monthly_distribution.sort_values(["stat_month", "segment"], inplace=True)
+
+                fig = px.bar(
+                    monthly_distribution,
+                    x="month_label",
+                    y="message_share",
+                    color="segment",
+                    custom_data=["message_count"],
+                    category_orders={"segment": segment_order},
+                    labels={"month_label": "月份", "message_share": "訊息佔比", "segment": "族群"},
+                )
+                fig.update_layout(
+                    title=None,
+                    xaxis_title="月份",
+                    yaxis_title="訊息佔比 (%)",
+                    barmode="stack",
+                    legend_title_text="族群",
+                )
+                fig.update_yaxes(tickformat=".0%")
+                fig.update_traces(
+                    hovertemplate="月份=%{x}<br>%{fullData.name}占比=%{y:.2%}<br>訊息數=%{customdata[0]:,.0f} 則<extra></extra>"
+                )
+                st.plotly_chart(
+                    fig,
+                    use_container_width=True,
+                    config={
+                        "modeBarButtonsToKeep": ["toImage", "pan2d", "toggleFullscreen"],
+                        "displaylogo": False,
+                    },
+                )
 
     if leaderboard:
         st.markdown(
@@ -491,7 +916,7 @@ def render_activation() -> None:
 render_overview()
 
 usage_tab, engagement_tab, message_tab, activation_tab = st.tabs(
-    ["使用人數分析", "黏著度分析", "訊息量分析", "啟用與留存"]
+    ["使用人數分析", "訊息量分析" , "黏著度分析", "啟用與留存"]
 )
 
 with usage_tab:

@@ -44,6 +44,7 @@ class MessageKPI(BaseModel):
     total_messages: int
     active_users: int
     avg_messages_per_user: Optional[float] = None
+    total_employees: Optional[int] = None
 
 
 class OverviewResponse(BaseModel):
@@ -99,6 +100,7 @@ class MessageTrendItem(BaseModel):
     total_messages: int
     active_users: int
     avg_messages_per_user: Optional[float] = None
+    total_employees: Optional[int] = None
 
 
 class MessageDistributionItem(BaseModel):
