@@ -65,8 +65,8 @@ CHART_TOOLTIPS = {
     "department_usage": "各部門有使用過人數 ÷ 部門總員工數，辨識推廣強弱單位。",
     "daily_active": "當日有使用的人數 ÷ 總員工數，快速掌握每日黏著度。",
     "weekly_active": "當週有使用的人數 ÷ 總員工數，觀察每週活躍趨勢穩定度。",
-    "workday_messages": "僅統計工作日訊息總數，可切換逐日或逐週平均，掌握系統熱度與負載走勢。",
-    "per_capita_messages": "工作日訊息總數除以在職員工數，評估人均互動深度。",
+    "workday_messages": "僅統計工作日訊息總數，彙整為每月平均，掌握系統熱度與負載走勢。",
+    "per_capita_messages": "工作日訊息總數除以在職員工數，並以月份呈現人均互動深度。",
     "message_distribution": "以前 20% / 中間 60% / 後 20% 分層彙總訊息占比，判斷是否集中在少數人。",
     "message_leaderboard": "訊息量排名前 10 的使用者，協助了解核心使用者。",
     "activation": "啟用率：到職後有使用過的人數比例，評估部署覆蓋。",
@@ -620,151 +620,257 @@ def render_messages() -> None:
         and workday_df["total_employees"].fillna(0).gt(0).any()
     )
 
-    chart_count = int(show_workday_trend) + int(show_per_capita)
-    if chart_count:
-        cols = st.columns(chart_count, gap="large") if chart_count > 1 else st.columns(1, gap="large")
-        col_index = 0
+    monthly_avg_df = pd.DataFrame()
+    if show_workday_trend:
+        monthly_source = workday_df.dropna(subset=["total_messages"]).copy()
+        if not monthly_source.empty:
+            monthly_source["total_messages"] = pd.to_numeric(
+                monthly_source["total_messages"], errors="coerce"
+            )
+            monthly_source = monthly_source.dropna(subset=["total_messages"])
+            if not monthly_source.empty:
+                monthly_source["stat_month"] = monthly_source["stat_date"].dt.to_period("M")
+                monthly_avg_df = (
+                    monthly_source.groupby("stat_month", as_index=False)
+                    .agg(
+                        total_messages=("total_messages", "sum"),
+                        workdays=("stat_date", "count"),
+                    )
+                )
+                monthly_avg_df = monthly_avg_df[monthly_avg_df["workdays"] > 0]
+                if not monthly_avg_df.empty:
+                    monthly_avg_df["avg_messages"] = (
+                        monthly_avg_df["total_messages"] / monthly_avg_df["workdays"]
+                    )
+                    monthly_avg_df["month_start"] = (
+                        monthly_avg_df["stat_month"].dt.to_timestamp()
+                    )
+                    monthly_avg_df["month_label"] = monthly_avg_df["stat_month"].astype(str)
+                    monthly_avg_df.sort_values("stat_month", inplace=True)
 
-        if show_workday_trend:
-            with cols[col_index]:
-                st.markdown(
-                    info_badge("工作日平均訊息數", CHART_TOOLTIPS.get("workday_messages"), font_size="18px"),
-                    unsafe_allow_html=True,
-                )
-                granularity = st.radio(
-                    "顯示粒度",
-                    ["逐日", "逐週"],
-                    horizontal=True,
-                    key="workday_message_granularity",
-                )
-                fig = None
-                if granularity == "逐日":
-                    daily_df = workday_df[["stat_date", "total_messages"]].copy()
-                    daily_df.sort_values("stat_date", inplace=True)
-                    if daily_df.empty:
-                        st.info("目前沒有可用的工作日訊息資料。")
-                    else:
-                        fig = go.Figure()
-                        fig.add_trace(
-                            go.Scatter(
-                                x=daily_df["stat_date"],
-                                y=daily_df["total_messages"],
-                                mode="lines+markers",
-                                name="訊息數",
-                                hovertemplate="日期=%{x|%Y-%m-%d}<br>訊息數=%{y:,.0f} 則<extra></extra>",
-                            )
-                        )
-                        fig.update_layout(
-                            title=None,
-                            xaxis_title="統計日期",
-                            yaxis_title="訊息數 (則)",
-                        )
-                else:
-                    weekly_df = (
-                        workday_df.set_index("stat_date")
-                        .resample("W-FRI")
-                        .agg(avg_messages=("total_messages", "mean"), workdays=("total_messages", "count"))
-                        .reset_index()
+    monthly_per_capita_df = pd.DataFrame()
+    if show_per_capita:
+        per_capita_source = workday_df.dropna(
+            subset=["total_messages", "total_employees"]
+        ).copy()
+        if not per_capita_source.empty:
+            per_capita_source["total_messages"] = pd.to_numeric(
+                per_capita_source["total_messages"], errors="coerce"
+            )
+            per_capita_source["total_employees"] = pd.to_numeric(
+                per_capita_source["total_employees"], errors="coerce"
+            )
+            per_capita_source["total_employees"] = per_capita_source["total_employees"].replace({0: pd.NA})
+            per_capita_source = per_capita_source.dropna(
+                subset=["total_messages", "total_employees"]
+            )
+            per_capita_source = per_capita_source[per_capita_source["total_employees"] > 0]
+            if not per_capita_source.empty:
+                per_capita_source["stat_month"] = per_capita_source["stat_date"].dt.to_period("M")
+                monthly_per_capita_df = (
+                    per_capita_source.groupby("stat_month", as_index=False)
+                    .agg(
+                        total_messages=("total_messages", "sum"),
+                        total_employees=("total_employees", "sum"),
+                        workdays=("stat_date", "count"),
                     )
-                    weekly_df = weekly_df[weekly_df["workdays"] > 0]
-                    if weekly_df.empty:
-                        st.info("資料不足以產生逐週視圖。")
-                    else:
-                        weekly_df.sort_values("stat_date", inplace=True)
-                        weekly_df["week_label"] = weekly_df["stat_date"].dt.strftime("%G-W%V")
-                        fig = go.Figure()
-                        fig.add_trace(
-                            go.Scatter(
-                                x=weekly_df["stat_date"],
-                                y=weekly_df["avg_messages"],
-                                mode="lines+markers",
-                                name="平均訊息數",
-                                customdata=weekly_df[["week_label", "workdays"]].to_numpy(),
-                                hovertemplate=(
-                                    "週別=%{customdata[0]}<br>"
-                                    "平均訊息數=%{y:,.2f} 則<br>"
-                                    "工作日數=%{customdata[1]} 天<extra></extra>"
-                                ),
-                            )
-                        )
-                        fig.update_layout(
-                            title=None,
-                            xaxis_title="週結束日期",
-                            yaxis_title="平均訊息數 (則)",
-                        )
-                        fig.update_xaxes(tickformat="%Y-%m-%d")
+                )
+                monthly_per_capita_df = monthly_per_capita_df[
+                    monthly_per_capita_df["total_employees"] > 0
+                ]
+                if not monthly_per_capita_df.empty:
+                    monthly_per_capita_df["messages_per_employee"] = (
+                        monthly_per_capita_df["total_messages"]
+                        / monthly_per_capita_df["total_employees"]
+                    )
+                    monthly_per_capita_df["avg_employees"] = (
+                        monthly_per_capita_df["total_employees"]
+                        / monthly_per_capita_df["workdays"]
+                    )
+                    monthly_per_capita_df["month_start"] = (
+                        monthly_per_capita_df["stat_month"].dt.to_timestamp()
+                    )
+                    monthly_per_capita_df["month_label"] = (
+                        monthly_per_capita_df["stat_month"].astype(str)
+                    )
+                    monthly_per_capita_df.sort_values("stat_month", inplace=True)
 
-                if fig:
-                    fig.update_layout(legend_title_text=None)
-                    st.plotly_chart(
-                        fig,
-                        use_container_width=True,
-                        config={
-                            "modeBarButtonsToKeep": ["toImage", "pan2d", "toggleFullscreen"],
-                            "displaylogo": False,
-                        },
-                    )
-            col_index += 1
+    if show_workday_trend:
+        st.markdown(
+            info_badge("工作日平均訊息數", CHART_TOOLTIPS.get("workday_messages"), font_size="18px"),
+            unsafe_allow_html=True,
+        )
+        chart_col, table_col = st.columns((2, 1), gap="large")
 
-        if show_per_capita:
-            target_col = cols[col_index if chart_count > 1 else 0]
-            with target_col:
-                st.markdown(
-                    info_badge("工作日人均訊息數", CHART_TOOLTIPS.get("per_capita_messages"), font_size="18px"),
-                    unsafe_allow_html=True,
+        if monthly_avg_df.empty:
+            with chart_col:
+                st.info("目前沒有可用的工作日訊息資料。")
+            with table_col:
+                st.info("沒有資料可供列出。")
+        else:
+            with chart_col:
+                customdata = monthly_avg_df[["month_label", "workdays", "total_messages"]].to_numpy()
+                fig = go.Figure()
+                fig.add_trace(
+                    go.Bar(
+                        x=monthly_avg_df["month_start"],
+                        y=monthly_avg_df["avg_messages"],
+                        name="平均訊息數",
+                        customdata=customdata,
+                        hovertemplate=(
+                            "月份=%{customdata[0]}<br>"
+                            "平均訊息數=%{y:,.2f} 則<br>"
+                            "工作日數=%{customdata[1]:,.0f} 天<br>"
+                            "訊息總數=%{customdata[2]:,.0f} 則<extra></extra>"
+                        ),
+                    )
                 )
-                per_capita_df = workday_df.copy()
-                per_capita_df.sort_values("stat_date", inplace=True)
-                per_capita_df["total_employees"] = per_capita_df["total_employees"].replace({0: pd.NA})
-                per_capita_df["messages_per_employee"] = (
-                    per_capita_df["total_messages"] / per_capita_df["total_employees"]
+                fig.add_trace(
+                    go.Scatter(
+                        x=monthly_avg_df["month_start"],
+                        y=monthly_avg_df["avg_messages"],
+                        mode="lines+markers",
+                        name="趨勢線",
+                        line=dict(color="#ff7f0e"),
+                        hoverinfo="skip",
+                    )
                 )
-                per_capita_df = per_capita_df.dropna(subset=["messages_per_employee"])
-                if per_capita_df.empty:
-                    st.info("目前沒有足夠的資料計算人均訊息數。")
-                else:
-                    per_capita_df["messages_per_employee"] = per_capita_df["messages_per_employee"].astype(float)
-                    fig = go.Figure()
-                    customdata = per_capita_df[["total_messages", "total_employees"]].to_numpy()
-                    fig.add_trace(
-                        go.Bar(
-                            x=per_capita_df["stat_date"],
-                            y=per_capita_df["messages_per_employee"],
-                            name="人均訊息數",
-                            customdata=customdata,
-                            hovertemplate=(
-                                "日期=%{x|%Y-%m-%d}<br>"
-                                "人均訊息數=%{y:,.2f} 則<br>"
-                                "訊息總數=%{customdata[0]:,.0f} 則<br>"
-                                "在職員工=%{customdata[1]:,.0f} 人<extra></extra>"
-                            ),
-                        )
+                fig.update_layout(
+                    title=None,
+                    xaxis_title="統計月份",
+                    yaxis_title="平均訊息數 (則)",
+                    legend_title_text=None,
+                )
+                fig.update_xaxes(dtick="M1", tickformat="%Y-%m")
+                st.plotly_chart(
+                    fig,
+                    use_container_width=True,
+                    config={
+                        "modeBarButtonsToKeep": ["toImage", "pan2d", "toggleFullscreen"],
+                        "displaylogo": False,
+                    },
+                )
+
+            with table_col:
+                table_df = monthly_avg_df[
+                    ["month_label", "avg_messages", "workdays", "total_messages"]
+                ].copy()
+                table_df["workdays"] = table_df["workdays"].round().astype("Int64")
+                table_df.rename(
+                    columns={
+                        "month_label": "月份",
+                        "avg_messages": "平均訊息數 (則)",
+                        "workdays": "工作日數 (天)",
+                        "total_messages": "訊息總數 (則)",
+                    },
+                    inplace=True,
+                )
+                table_df["平均訊息數 (則)"] = table_df["平均訊息數 (則)"].map(
+                    lambda v: f"{v:,.2f}" if pd.notna(v) else "—"
+                )
+                table_df["工作日數 (天)"] = table_df["工作日數 (天)"].map(
+                    lambda v: f"{int(v):,}" if pd.notna(v) else "—"
+                )
+                table_df["訊息總數 (則)"] = table_df["訊息總數 (則)"].map(
+                    lambda v: f"{v:,.0f}" if pd.notna(v) else "—"
+                )
+                st.dataframe(table_df, use_container_width=True, hide_index=True)
+
+    if show_per_capita:
+        st.markdown(
+            info_badge("工作日人均訊息數", CHART_TOOLTIPS.get("per_capita_messages"), font_size="18px"),
+            unsafe_allow_html=True,
+        )
+        chart_col, table_col = st.columns((2, 1), gap="large")
+
+        if monthly_per_capita_df.empty:
+            with chart_col:
+                st.info("目前沒有足夠的資料計算人均訊息數。")
+            with table_col:
+                st.info("沒有資料可供列出。")
+        else:
+            with chart_col:
+                customdata = monthly_per_capita_df[
+                    ["month_label", "avg_employees", "workdays", "total_messages"]
+                ].to_numpy()
+                fig = go.Figure()
+                fig.add_trace(
+                    go.Bar(
+                        x=monthly_per_capita_df["month_start"],
+                        y=monthly_per_capita_df["messages_per_employee"],
+                        name="人均訊息數",
+                        customdata=customdata,
+                        hovertemplate=(
+                            "月份=%{customdata[0]}<br>"
+                            "人均訊息數=%{y:,.2f} 則<br>"
+                            "平均在職員工=%{customdata[1]:,.0f} 人<br>"
+                            "工作日數=%{customdata[2]:,.0f} 天<br>"
+                            "訊息總數=%{customdata[3]:,.0f} 則<extra></extra>"
+                        ),
                     )
-                    fig.add_trace(
-                        go.Scatter(
-                            x=per_capita_df["stat_date"],
-                            y=per_capita_df["messages_per_employee"],
-                            mode="lines+markers",
-                            name="趨勢線",
-                            line=dict(color="#ff7f0e"),
-                            hoverinfo="skip",
-                        )
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=monthly_per_capita_df["month_start"],
+                        y=monthly_per_capita_df["messages_per_employee"],
+                        mode="lines+markers",
+                        name="趨勢線",
+                        line=dict(color="#ff7f0e"),
+                        hoverinfo="skip",
                     )
-                    fig.update_layout(
-                        title=None,
-                        xaxis_title="統計日期",
-                        yaxis_title="人均訊息數 (則)",
-                        legend_title_text=None,
-                    )
-                    fig.update_yaxes(tickformat=".2f")
-                    st.plotly_chart(
-                        fig,
-                        use_container_width=True,
-                        config={
-                            "modeBarButtonsToKeep": ["toImage", "pan2d", "toggleFullscreen"],
-                            "displaylogo": False,
-                        },
-                    )
+                )
+                fig.update_layout(
+                    title=None,
+                    xaxis_title="統計月份",
+                    yaxis_title="人均訊息數 (則)",
+                    legend_title_text=None,
+                )
+                fig.update_xaxes(dtick="M1", tickformat="%Y-%m")
+                fig.update_yaxes(tickformat=".2f")
+                st.plotly_chart(
+                    fig,
+                    use_container_width=True,
+                    config={
+                        "modeBarButtonsToKeep": ["toImage", "pan2d", "toggleFullscreen"],
+                        "displaylogo": False,
+                    },
+                )
+
+            with table_col:
+                table_df = monthly_per_capita_df[
+                    [
+                        "month_label",
+                        "messages_per_employee",
+                        "avg_employees",
+                        "workdays",
+                        "total_messages",
+                    ]
+                ].copy()
+                table_df["avg_employees"] = table_df["avg_employees"].round()
+                table_df["workdays"] = table_df["workdays"].round().astype("Int64")
+                table_df.rename(
+                    columns={
+                        "month_label": "月份",
+                        "messages_per_employee": "人均訊息數 (則)",
+                        "avg_employees": "平均在職員工 (人)",
+                        "workdays": "工作日數 (天)",
+                        "total_messages": "訊息總數 (則)",
+                    },
+                    inplace=True,
+                )
+                table_df["人均訊息數 (則)"] = table_df["人均訊息數 (則)"].map(
+                    lambda v: f"{v:,.2f}" if pd.notna(v) else "—"
+                )
+                table_df["平均在職員工 (人)"] = table_df["平均在職員工 (人)"].map(
+                    lambda v: f"{v:,.0f}" if pd.notna(v) else "—"
+                )
+                table_df["工作日數 (天)"] = table_df["工作日數 (天)"].map(
+                    lambda v: f"{int(v):,}" if pd.notna(v) else "—"
+                )
+                table_df["訊息總數 (則)"] = table_df["訊息總數 (則)"].map(
+                    lambda v: f"{v:,.0f}" if pd.notna(v) else "—"
+                )
+                st.dataframe(table_df, use_container_width=True, hide_index=True)
 
     if distribution_data:
         dist_df = pd.DataFrame(distribution_data)
