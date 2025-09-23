@@ -1,13 +1,13 @@
-﻿"""APP 使用分析主要 ETL Pipeline。"""
+﻿"""APP 使用分析主要 ETL Pipeline（對齊 SQL 定義版）。"""
 
 from __future__ import annotations
 
 from datetime import date, timedelta
 from typing import Dict, Optional
 
+import numpy as np
 import pandas as pd
 
-from app.config.settings import settings
 from app.etl.pipelines.base import BasePipeline
 from app.etl.sources.sql_server import SQLServerSource
 from app.etl.storage.duckdb_client import DuckDBClient
@@ -17,9 +17,19 @@ logger = get_logger(__name__)
 
 
 class UsageStatsPipeline(BasePipeline):
-    """負責將 SQL Server 資料彙整至 DuckDB 的 Pipeline。"""
+    """負責將 SQL Server 資料彙整至 DuckDB 的 Pipeline（對齊你提供的 SQL 指標邏輯）。"""
 
     name = "usage-stats-pipeline"
+
+    # 寫入 DuckDB 的表名（可依需要改名）
+    TBL_COVERAGE_COMPANY_WEEKLY = "coverage_company_weekly"
+    TBL_COVERAGE_UNIT_WEEKLY = "coverage_unit_weekly"
+    TBL_ACTIVE_RATE_WORKINGDAY_DAILY = "active_rate_workingday_daily"
+    TBL_ACTIVATION_NEXT_MONTH = "activation_next_month_company"
+    TBL_RETENTION_MONTHLY = "retention_monthly_company"
+    TBL_MSG_WEEKLY_TOTAL = "messages_weekly_total"
+    TBL_MSG_WEEKLY_PERCAPITA = "messages_weekly_percapita"
+    TBL_MSG_DISTRIBUTION = "message_distribution_weekly_20_60_20"
 
     def __init__(
         self,
@@ -40,7 +50,6 @@ class UsageStatsPipeline(BasePipeline):
     # ------------------------------------------------------------------
     def extract(self) -> Dict[str, pd.DataFrame]:
         """從 SQL Server 擷取各類指標所需原始資料。"""
-
         logger.info(
             "抽取目標日期：%s (full_refresh=%s, lookback_days=%s)",
             self.target_date,
@@ -52,581 +61,532 @@ class UsageStatsPipeline(BasePipeline):
         if not self.full_refresh:
             params["start_date"] = self.target_date - timedelta(days=self.lookback_days)
 
+        # 部門樹（根節點：OrgId 末四碼 = '0000'，排除 '10000'）
+        # 員工來源表：empbas_app（含 InDate/OutDate）
         employee_query = """
             WITH RecursiveOrg AS (
-                SELECT OrgId AS RootOrgId,
-                       OrgName AS RootOrgName,
-                       OrgId,
-                       OrgName,
-                       SuperOrgId
+                SELECT OrgId AS RootOrgId, OrgName AS RootOrgName,
+                       OrgId, OrgName, SuperOrgId
                 FROM ClassOrg WITH (NOLOCK)
-                WHERE RIGHT(OrgId, 4) = '0000'
-
+                WHERE RIGHT(OrgId, 4) = '0000' AND OrgId <> '10000'
                 UNION ALL
-
-                SELECT r.RootOrgId,
-                       r.RootOrgName,
-                       c.OrgId,
-                       c.OrgName,
-                       c.SuperOrgId
-                FROM ClassOrg AS c WITH (NOLOCK)
-                INNER JOIN RecursiveOrg AS r ON c.SuperOrgId = r.OrgId
+                SELECT r.RootOrgId, r.RootOrgName,
+                       c.OrgId, c.OrgName, c.SuperOrgId
+                FROM ClassOrg c WITH (NOLOCK)
+                INNER JOIN RecursiveOrg r ON c.SuperOrgId = r.OrgId
             ),
             EmployeeOrg AS (
-                SELECT e.EmpId,
-                       e.UnitId,
-                       e.OutDate,
-                       r.RootOrgId,
-                       r.RootOrgName
-                FROM empbas AS e WITH (NOLOCK)
-                LEFT JOIN RecursiveOrg AS r ON e.UnitId = r.OrgId
+                SELECT e.EmpId, e.UnitId, e.InDate, e.OutDate,
+                       r.RootOrgId, r.RootOrgName
+                FROM empbas_app e WITH (NOLOCK)
+                LEFT JOIN RecursiveOrg r ON e.UnitId = r.OrgId
             )
-            SELECT
-                eo.EmpId AS EmpId,
-                eo.UnitId AS UnitId,
-                eo.OutDate AS OutDate,
-                eo.RootOrgId AS RootUnitId,
-                eo.RootOrgName AS RootUnitName,
-                org.OrgName AS UnitName
-            FROM EmployeeOrg AS eo
-            LEFT JOIN ClassOrg AS org WITH (NOLOCK)
-              ON eo.UnitId = org.OrgId
+            SELECT EmpId, UnitId, InDate, OutDate, RootOrgId, RootOrgName
+            FROM EmployeeOrg
             OPTION (MAXRECURSION 100)
         """
 
+        # 活躍紀錄（限定日期範圍）
         if self.full_refresh:
             daily_active_query = """
-                SELECT
-                    CAST(dua.ActivateTime AS DATE) AS ActiveDate,
-                    e.UnitId AS UnitId,
-                    dua.EmpId AS EmpId
-                FROM UTLife_DailyActivateUser AS dua WITH (NOLOCK)
-                INNER JOIN empbas AS e WITH (NOLOCK) ON e.EmpId = dua.EmpId
-                WHERE e.OutDate IS NULL
-                  AND CAST(dua.ActivateTime AS DATE) <= :target_date
+                SELECT CAST(a.ActivateTime AS DATE) AS ActiveDate,
+                       a.EmpId
+                FROM UTLife_DailyActivateUser a WITH (NOLOCK)
+                WHERE CAST(a.ActivateTime AS DATE) <= :target_date
             """
-
             message_query = """
-                SELECT
-                    CAST(m.Timestamp AS DATE) AS MsgDate,
-                    m.SendEmpid AS EmpId,
-                    e.UnitId AS UnitId,
-                    COUNT(1) AS MessageCount
-                FROM LineGPT_Messages AS m WITH (NOLOCK)
-                INNER JOIN empbas AS e WITH (NOLOCK) ON e.EmpId = m.SendEmpid
-                WHERE e.OutDate IS NULL
-                  AND CAST(m.Timestamp AS DATE) <= :target_date
-                GROUP BY CAST(m.Timestamp AS DATE), m.SendEmpid, e.UnitId
+                SELECT CAST(m.Timestamp AS DATE) AS MsgDate,
+                       m.SendEmpid AS EmpId
+                FROM LineGPT_Messages m WITH (NOLOCK)
+                WHERE CAST(m.Timestamp AS DATE) <= :target_date
             """
         else:
             daily_active_query = """
-                SELECT
-                    CAST(dua.ActivateTime AS DATE) AS ActiveDate,
-                    e.UnitId AS UnitId,
-                    dua.EmpId AS EmpId
-                FROM UTLife_DailyActivateUser AS dua WITH (NOLOCK)
-                INNER JOIN empbas AS e WITH (NOLOCK) ON e.EmpId = dua.EmpId
-                WHERE e.OutDate IS NULL
-                  AND CAST(dua.ActivateTime AS DATE) BETWEEN :start_date AND :target_date
+                SELECT CAST(a.ActivateTime AS DATE) AS ActiveDate,
+                       a.EmpId
+                FROM UTLife_DailyActivateUser a WITH (NOLOCK)
+                WHERE CAST(a.ActivateTime AS DATE) BETWEEN :start_date AND :target_date
             """
-
             message_query = """
-                SELECT
-                    CAST(m.Timestamp AS DATE) AS MsgDate,
-                    m.SendEmpid AS EmpId,
-                    e.UnitId AS UnitId,
-                    COUNT(1) AS MessageCount
-                FROM LineGPT_Messages AS m WITH (NOLOCK)
-                INNER JOIN empbas AS e WITH (NOLOCK) ON e.EmpId = m.SendEmpid
-                WHERE e.OutDate IS NULL
-                  AND CAST(m.Timestamp AS DATE) BETWEEN :start_date AND :target_date
-                GROUP BY CAST(m.Timestamp AS DATE), m.SendEmpid, e.UnitId
+                SELECT CAST(m.Timestamp AS DATE) AS MsgDate,
+                       m.SendEmpid AS EmpId
+                FROM LineGPT_Messages m WITH (NOLOCK)
+                WHERE CAST(m.Timestamp AS DATE) BETWEEN :start_date AND :target_date
             """
 
-        device_query = """
-            SELECT
-                d.EmpId AS EmpId,
-                MIN(d.BuildDate) AS FirstInstallDate
-            FROM UTLife_DeviceInfoList AS d WITH (NOLOCK)
-            INNER JOIN empbas AS e WITH (NOLOCK) ON e.EmpId = d.EmpId
-            WHERE e.OutDate IS NULL
-            GROUP BY d.EmpId
+        # 曾經使用過（到 target_date 為止）
+        ever_used_query = """
+            SELECT DISTINCT a.EmpId
+            FROM UTLife_DailyActivateUser a WITH (NOLOCK)
+            WHERE CAST(a.ActivateTime AS DATE) <= :target_date
         """
 
         return {
             "employees": self.sql_source.fetch_dataframe(employee_query, params=None),
             "daily_active": self.sql_source.fetch_dataframe(daily_active_query, params),
             "messages": self.sql_source.fetch_dataframe(message_query, params),
-            "device": self.sql_source.fetch_dataframe(device_query, params=None),
+            "ever_used": self.sql_source.fetch_dataframe(ever_used_query, {"target_date": self.target_date}),
         }
 
     # ------------------------------------------------------------------
-    # 轉換階段
+    # 轉換階段（完全依照你給的 SQL 指標定義）
     # ------------------------------------------------------------------
-    def transform(self, raw_items: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
-        """利用 pandas 計算指標。"""
+    def transform(self, raw: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
+        employees = raw["employees"].copy()
+        daily_active = raw["daily_active"].copy()
+        messages = raw["messages"].copy()
+        ever_used = raw["ever_used"].copy()
 
-        employees = raw_items["employees"].rename(
+        # 欄位標準化
+        employees.rename(
             columns={
                 "EmpId": "emp_id",
                 "UnitId": "unit_id",
+                "InDate": "in_date",
                 "OutDate": "out_date",
-                "UnitName": "unit_name",
-                "RootUnitId": "root_unit_id",
-                "RootUnitName": "root_unit_name",
-            }
+                "RootOrgId": "root_org_id",
+                "RootOrgName": "root_org_name",
+            },
+            inplace=True,
         )
-        if "emp_id" not in employees.columns and "EmpNo" in employees.columns:
-            employees.rename(columns={"EmpNo": "emp_id"}, inplace=True)
-        required_employee_columns = {
-            "emp_id": pd.NA,
-            "unit_id": pd.NA,
-            "out_date": pd.NA,
-            "unit_name": pd.NA,
-            "root_unit_id": pd.NA,
-            "root_unit_name": pd.NA,
-        }
-        for column_name, default_value in required_employee_columns.items():
-            if column_name not in employees.columns:
-                employees[column_name] = default_value
-        employees["unit_name"].fillna("\u672a\u5b9a\u7fa9", inplace=True)
-        employees["root_unit_name"].fillna(employees["unit_name"], inplace=True)
-        employees["agg_unit_id"] = employees["root_unit_id"].where(
-            employees["root_unit_id"].notna(), employees["unit_id"]
-        )
-        employees["agg_unit_name"] = employees["root_unit_name"].where(
-            employees["root_unit_name"].notna(), employees["unit_name"]
-        )
-        employees["agg_unit_name"].fillna("\u672a\u5b9a\u7fa9", inplace=True)
+        daily_active.rename(columns={"ActiveDate": "date", "EmpId": "emp_id"}, inplace=True)
+        messages.rename(columns={"MsgDate": "date", "EmpId": "emp_id"}, inplace=True)
+        ever_used.rename(columns={"EmpId": "emp_id"}, inplace=True)
 
-        daily_active = raw_items["daily_active"].rename(
-            columns={"ActiveDate": "active_date", "UnitId": "unit_id", "EmpId": "emp_id"}
-        )
-        if "emp_id" not in daily_active.columns and "EmpNo" in daily_active.columns:
-            daily_active.rename(columns={"EmpNo": "emp_id"}, inplace=True)
-        messages = raw_items["messages"].rename(
-            columns={
-                "MsgDate": "stat_date",
-                "EmpId": "emp_id",
-                "UnitId": "unit_id",
-                "MessageCount": "message_count",
-            }
-        )
-        if "emp_id" not in messages.columns:
-            for fallback_col in ("SenderEmpNo", "SenderEmpId", "SendEmpid"):
-                if fallback_col in messages.columns:
-                    messages.rename(columns={fallback_col: "emp_id"}, inplace=True)
-                    break
-        device = raw_items["device"].rename(
-            columns={"EmpId": "emp_id", "FirstInstallDate": "first_install_date"}
-        )
-        if "emp_id" not in device.columns and "EmpNo" in device.columns:
-            device.rename(columns={"EmpNo": "emp_id"}, inplace=True)
+        # 轉日期型別
+        for col in ("in_date", "out_date"):
+            employees[col] = pd.to_datetime(employees[col], errors="coerce")
+        daily_active["date"] = pd.to_datetime(daily_active["date"], errors="coerce")
+        messages["date"] = pd.to_datetime(messages["date"], errors="coerce")
 
-        daily_active["active_date"] = pd.to_datetime(daily_active["active_date"], errors="coerce")
-        messages["stat_date"] = pd.to_datetime(messages["stat_date"], errors="coerce")
-        device["first_install_date"] = pd.to_datetime(device["first_install_date"], errors="coerce")
+        # ISO 週資訊 + 每週基準日（使用活躍資料週內最小日期作為基準日）
+        if not daily_active.empty:
+            iso = daily_active["date"].dt.isocalendar()
+            daily_active["iso_year"] = iso["year"].astype(int)
+            daily_active["iso_week"] = iso["week"].astype(int)
+            week_min = (
+                daily_active.groupby(["iso_year", "iso_week"])["date"]
+                .min()
+                .reset_index()
+                .rename(columns={"date": "baseline_date"})
+            )
+        else:
+            week_min = pd.DataFrame(columns=["iso_year", "iso_week", "baseline_date"])
 
-        active_employees = employees[employees["out_date"].isna()].copy()
-        unit_counts = (
-            active_employees.groupby(["agg_unit_id", "agg_unit_name"], dropna=False)["emp_id"]
-            .nunique()
-            .reset_index(name="total_users")
-        )
-        unit_counts.rename(columns={"agg_unit_id": "unit_id", "agg_unit_name": "unit_name"}, inplace=True)
-        company_total = int(active_employees["emp_id"].nunique())
-        unit_name_lookup = unit_counts.dropna(subset=["unit_id"]).set_index("unit_id")["unit_name"].to_dict()
+        # 判斷在職：InDate <= d 且 (OutDate 為空 或 OutDate > d)
+        def employed_on(d: pd.Timestamp) -> pd.Series:
+            return (employees["in_date"] <= d) & (employees["out_date"].isna() | (employees["out_date"] > d))
 
-        # Attach aggregated root units to usage metrics
-        daily_active = daily_active.merge(
-            employees[["emp_id", "agg_unit_id", "agg_unit_name"]],
-            on="emp_id",
-            how="left",
-        )
-        if "unit_name" not in daily_active.columns:
-            daily_active["unit_name"] = pd.NA
-        daily_active["unit_id"] = daily_active["agg_unit_id"].where(
-            daily_active["agg_unit_id"].notna(), daily_active["unit_id"]
-        )
-        daily_active["unit_name"] = daily_active["agg_unit_name"].where(
-            daily_active["agg_unit_name"].notna(), daily_active["unit_name"]
-        )
-        daily_active.drop(columns=["agg_unit_id", "agg_unit_name"], inplace=True)
+        # --------------------------------------------------------------
+        # 1) 全公司覆蓋率（週）
+        # 分子：曾經使用過 ∩ 當週在職；分母：當週在職（以基準日快照）
+        # --------------------------------------------------------------
+        coverage_company_rows = []
+        ever_used_ids = set(ever_used["emp_id"].dropna().astype(str))
+        for _, r in week_min.iterrows():
+            by = int(r["iso_year"])
+            bw = int(r["iso_week"])
+            bd = pd.to_datetime(r["baseline_date"])
 
-        messages = messages.merge(
-            employees[["emp_id", "agg_unit_id", "agg_unit_name"]],
-            on="emp_id",
-            how="left",
-        )
-        if "unit_name" not in messages.columns:
-            messages["unit_name"] = pd.NA
-        messages["unit_id"] = messages["agg_unit_id"].where(
-            messages["agg_unit_id"].notna(), messages["unit_id"]
-        )
-        messages["unit_name"] = messages["agg_unit_name"].where(
-            messages["agg_unit_name"].notna(), messages["unit_name"]
-        )
-        messages.drop(columns=["agg_unit_id", "agg_unit_name"], inplace=True)
+            mask = employed_on(bd)
+            in_service_ids = set(employees.loc[mask, "emp_id"].dropna().astype(str))
 
-        device = device.merge(
-            employees[["emp_id", "agg_unit_id", "agg_unit_name"]],
-            on="emp_id",
-            how="left",
-        )
-        device["unit_id"] = device["agg_unit_id"].where(
-            device["agg_unit_id"].notna(), device.get("unit_id")
-        )
-        device["unit_name"] = device["agg_unit_name"].where(
-            device["agg_unit_name"].notna(), device.get("unit_name")
-        )
-        device.drop(columns=["agg_unit_id", "agg_unit_name"], inplace=True)
+            covered = len(in_service_ids & ever_used_ids)
+            total = len(in_service_ids)
+            rate = (covered / total) if total else 0.0
 
-        # ------------------------------------------------------------------
-        # 週使用率（全公司 + 部門）
-        # ------------------------------------------------------------------
-        week_info = daily_active["active_date"].dt.isocalendar()
-        daily_active["iso_year"] = week_info["year"].astype("Int64")
-        daily_active["iso_week"] = week_info["week"].astype("Int64")
-        daily_active["week_label"] = (
-            daily_active["iso_year"].astype(str) + "-W" + daily_active["iso_week"].astype(str).str.zfill(2)
-        )
-        daily_active["week_start"] = daily_active["active_date"] - pd.to_timedelta(
-            daily_active["active_date"].dt.weekday, unit="D"
-        )
-        daily_active["unit_name"] = daily_active["unit_id"].map(unit_name_lookup)
+            coverage_company_rows.append(
+                {
+                    "iso_year": by,
+                    "iso_week": bw,
+                    "baseline_date": bd.date(),
+                    "covered_users": covered,
+                    "total_users": total,
+                    "coverage_rate": rate,
+                }
+            )
+        coverage_company_weekly = pd.DataFrame(coverage_company_rows).sort_values(["iso_year", "iso_week"])
 
-        weekly_unit = (
-            daily_active.groupby(
-                ["iso_year", "iso_week", "week_label", "week_start", "unit_id", "unit_name"],
-                dropna=False,
-            )["emp_id"]
-            .nunique()
-            .reset_index(name="active_users")
-        )
-        weekly_unit = weekly_unit.merge(unit_counts, how="left", on=["unit_id", "unit_name"])
-        weekly_unit["total_users"] = weekly_unit["total_users"].fillna(0).astype(int)
-        weekly_unit["usage_rate"] = (
-            weekly_unit["active_users"] / weekly_unit["total_users"].replace({0: pd.NA})
-        )
-        weekly_unit["usage_rate"] = weekly_unit["usage_rate"].fillna(0.0).astype(float)
-        weekly_unit["scope"] = "unit"
-        weekly_unit["scope_id"] = weekly_unit["unit_id"]
-        weekly_unit["unit_name"].fillna("未定義", inplace=True)
+        # --------------------------------------------------------------
+        # 2) 各部門覆蓋率（週）
+        # 分子：該週有使用（週活躍，依 RootOrg）；分母：基準日該部門在職
+        # --------------------------------------------------------------
+        emp_root = employees[["emp_id", "root_org_id", "root_org_name"]].drop_duplicates()
 
-        company_weekly = (
-            daily_active.groupby(["iso_year", "iso_week", "week_label", "week_start"], dropna=False)["emp_id"]
-            .nunique()
-            .reset_index(name="active_users")
-        )
-        company_weekly["total_users"] = company_total
-        company_weekly["usage_rate"] = (
-            company_weekly["active_users"] / company_weekly["total_users"].replace({0: pd.NA})
-        )
-        company_weekly["usage_rate"] = company_weekly["usage_rate"].fillna(0.0).astype(float)
-        company_weekly["scope"] = "company"
-        company_weekly["scope_id"] = None
-        company_weekly["unit_id"] = None
-        company_weekly["unit_name"] = "全公司"
+        if not daily_active.empty:
+            weekly_used = (
+                daily_active.merge(emp_root, on="emp_id", how="left")
+                .groupby(["iso_year", "iso_week", "root_org_id", "root_org_name"])["emp_id"]
+                .nunique()
+                .reset_index(name="used_users")
+            )
+        else:
+            weekly_used = pd.DataFrame(
+                columns=["iso_year", "iso_week", "root_org_id", "root_org_name", "used_users"]
+            )
 
-        usage_all = pd.concat([weekly_unit, company_weekly], ignore_index=True)
-        usage_all.rename(columns={"week_start": "stat_date"}, inplace=True)
-        usage_all = usage_all[
-            [
-                "stat_date",
-                "iso_year",
-                "iso_week",
-                "week_label",
-                "scope",
-                "scope_id",
-                "unit_id",
-                "unit_name",
-                "active_users",
-                "total_users",
-                "usage_rate",
-            ]
-        ].sort_values("stat_date")
+        unit_rows = []
+        for _, r in week_min.iterrows():
+            by = int(r["iso_year"])
+            bw = int(r["iso_week"])
+            bd = pd.to_datetime(r["baseline_date"])
 
-        # ------------------------------------------------------------------
-        # 日活躍
-        # ------------------------------------------------------------------
-        daily_company = (
-            daily_active.groupby("active_date")["emp_id"].nunique().reset_index(name="active_users")
-        )
-        daily_company["total_users"] = company_total
-        daily_company["active_rate"] = (
-            daily_company["active_users"] / daily_company["total_users"].replace({0: pd.NA})
-        )
-        daily_company["active_rate"] = daily_company["active_rate"].fillna(0.0).astype(float)
-        daily_company.rename(columns={"active_date": "stat_date"}, inplace=True)
-
-        # ------------------------------------------------------------------
-        # 訊息量每日彙總
-        # ------------------------------------------------------------------
-        device["unit_name"].fillna("\u672a\u5b9a\u7fa9", inplace=True)
-        device_active = device[device["emp_id"].isin(active_employees["emp_id"])].copy()
-        installed_total = int(device_active["emp_id"].nunique())
-
-        message_daily = messages.groupby("stat_date").agg(
-            total_messages=("message_count", "sum"),
-            active_users=("emp_id", "nunique"),
-        ).reset_index()
-        message_daily["avg_messages_per_user"] = (
-            message_daily["total_messages"] / message_daily["active_users"].replace({0: pd.NA})
-        )
-        message_daily["avg_messages_per_user"] = message_daily["avg_messages_per_user"].fillna(0.0).astype(float)
-        message_daily["total_employees"] = installed_total
-
-        messages["unit_name"].fillna("\u672a\u5b9a\u7fa9", inplace=True)
-        message_user_daily = messages.groupby(["stat_date", "emp_id", "unit_id"], dropna=False).agg(
-            message_count=("message_count", "sum")
-        ).reset_index()
-        message_user_daily["unit_name"] = message_user_daily["unit_id"].map(unit_name_lookup)
-
-        distribution_rows: list[dict[str, object]] = []
-        for stat_date, group in message_user_daily.groupby("stat_date"):
-            total_messages = group["message_count"].sum()
-            user_count = len(group)
-            if user_count == 0 or total_messages == 0:
+            mask = employed_on(bd)
+            snap = employees.loc[mask, ["emp_id", "root_org_id", "root_org_name"]].drop_duplicates()
+            denom = (
+                snap.groupby(["root_org_id", "root_org_name"])["emp_id"].nunique().reset_index(name="total_users")
+            )
+            if denom.empty:
                 continue
+            denom["iso_year"] = by
+            denom["iso_week"] = bw
+            denom["baseline_date"] = bd.date()
+            unit_rows.append(denom)
 
-            sorted_group = group.sort_values("message_count", ascending=False).reset_index(drop=True)
-            top_count = max(int(round(user_count * 0.2)), 1)
-            mid_count = max(int(round(user_count * 0.6)), 0)
-            if top_count + mid_count > user_count:
-                mid_count = max(user_count - top_count, 0)
-            bottom_count = max(user_count - top_count - mid_count, 0)
-
-            top_messages = sorted_group.iloc[:top_count]["message_count"].sum()
-            mid_messages = (
-                sorted_group.iloc[top_count : top_count + mid_count]["message_count"]
-                .sum()
-                if mid_count > 0
-                else 0
+        weekly_unit_den = (
+            pd.concat(unit_rows, ignore_index=True)
+            if unit_rows
+            else pd.DataFrame(
+                columns=["root_org_id", "root_org_name", "total_users", "iso_year", "iso_week", "baseline_date"]
             )
-            bottom_messages = (
-                sorted_group.iloc[top_count + mid_count :]["message_count"].sum()
-                if bottom_count > 0
-                else 0
+        )
+
+        coverage_unit_weekly = (
+            weekly_used.merge(
+                weekly_unit_den, on=["iso_year", "iso_week", "root_org_id", "root_org_name"], how="left"
+            )
+            .assign(
+                coverage_rate=lambda df: np.where(
+                    df["total_users"].fillna(0) > 0, df["used_users"] / df["total_users"], 0.0
+                ),
+                baseline_date=lambda df: df.get("baseline_date", pd.NaT),
+            )
+            .sort_values(["iso_year", "iso_week", "root_org_id"])
+        )
+
+        # --------------------------------------------------------------
+        # 3) 工作日活躍（日）= 週一~週五；分母 = 當日在職（每日快照）
+        # --------------------------------------------------------------
+        workday = daily_active[daily_active["date"].dt.weekday <= 4].copy()
+        daily_active_users = (
+            workday.groupby("date")["emp_id"].nunique().reset_index(name="active_users")
+            if not workday.empty
+            else pd.DataFrame(columns=["date", "active_users"])
+        )
+
+        if not daily_active_users.empty:
+            unique_days = daily_active_users["date"].drop_duplicates().sort_values()
+            denom_rows = []
+            for d in unique_days:
+                mask = employed_on(pd.to_datetime(d))
+                denom_rows.append(
+                    {"date": pd.to_datetime(d), "total_users": int(employees.loc[mask, "emp_id"].nunique())}
+                )
+            daily_total = pd.DataFrame(denom_rows)
+        else:
+            daily_total = pd.DataFrame(columns=["date", "total_users"])
+
+        active_rate_workingday_daily = (
+            daily_active_users.merge(daily_total, on="date", how="left")
+            .assign(
+                active_rate=lambda df: np.where(
+                    df["total_users"].fillna(0) > 0, df["active_users"] / df["total_users"], 0.0
+                )
+            )
+            .sort_values("date")
+        )
+
+        # --------------------------------------------------------------
+        # 4) 當月啟用率（公司）：入職月份新人 → 次月有使用 / 新人數
+        # --------------------------------------------------------------
+        employees_nonnull_in = employees.dropna(subset=["in_date"]).copy()
+        if employees_nonnull_in.empty:
+            activation_next_month_company = pd.DataFrame(
+                columns=["hire_month", "new_hires", "used_next_month", "activation_rate"]
+            )
+        else:
+            employees_nonnull_in["hire_month"] = (
+                employees_nonnull_in["in_date"].dt.to_period("M").dt.to_timestamp()
+            )
+            employees_nonnull_in["next_month_start"] = (
+                employees_nonnull_in["in_date"].dt.to_period("M").dt.to_timestamp() + pd.offsets.MonthBegin(1)
+            )
+            employees_nonnull_in["next_month_end"] = (
+                employees_nonnull_in["next_month_start"] + pd.offsets.MonthEnd(0)
             )
 
-            distribution_rows.extend(
-                [
-                    {
-                        "stat_date": stat_date,
-                        "segment": "\u524d20%",
-                        "user_share": top_count / user_count,
-                        "message_share": top_messages / total_messages,
-                        "user_count": top_count,
-                    },
-                    {
-                        "stat_date": stat_date,
-                        "segment": "\u4e2d\u959360%",
-                        "user_share": mid_count / user_count,
-                        "message_share": mid_messages / total_messages,
-                        "user_count": mid_count,
-                    },
-                    {
-                        "stat_date": stat_date,
-                        "segment": "\u5f8c20%",
-                        "user_share": bottom_count / user_count,
-                        "message_share": bottom_messages / total_messages,
-                        "user_count": bottom_count,
-                    },
-                ]
+            da = raw["daily_active"].copy()
+            da.rename(columns={"ActiveDate": "date", "EmpId": "emp_id"}, inplace=True) if "ActiveDate" in da.columns else None
+            da["date"] = pd.to_datetime(da["date"], errors="coerce")
+
+            nm = employees_nonnull_in[["emp_id", "hire_month", "next_month_start", "next_month_end"]]
+            used_nm = (
+                da.merge(nm, on="emp_id", how="inner")
+                .query("date >= next_month_start and date <= next_month_end")
+                .drop_duplicates(subset=["emp_id", "hire_month"])[["emp_id", "hire_month"]]
             )
 
-        message_distribution = pd.DataFrame(distribution_rows)
+            agg = employees_nonnull_in.groupby("hire_month")["emp_id"].nunique().reset_index(name="new_hires")
+            used = used_nm.groupby("hire_month")["emp_id"].nunique().reset_index(name="used_next_month")
+            activation_next_month_company = (
+                agg.merge(used, on="hire_month", how="left")
+                .fillna({"used_next_month": 0})
+                .assign(
+                    activation_rate=lambda df: np.where(
+                        df["new_hires"] > 0, df["used_next_month"] / df["new_hires"], 0.0
+                    )
+                )
+                .sort_values("hire_month")
+            )
 
-        leaderboard = (
-            message_user_daily.groupby("emp_id")
-            .agg(total_messages=("message_count", "sum"), unit_id=("unit_id", "first"))
-            .reset_index()
-            .sort_values("total_messages", ascending=False)
-        )
-        leaderboard.rename(columns={"emp_id": "emp_no"}, inplace=True)
-        leaderboard["unit_name"] = leaderboard["unit_id"].map(unit_name_lookup)
-        leaderboard["unit_name"].fillna("未定義", inplace=True)
-        leaderboard["rank"] = range(1, len(leaderboard) + 1)
-        leaderboard = leaderboard.head(10)
+        # --------------------------------------------------------------
+        # 5) 當月留存率（公司）：自 2025-01-01 起
+        # 留存率 = 月活躍人數 / 總註冊人數（>= 2025-01-01 曾經使用過的人數）
+        # --------------------------------------------------------------
+        baseline = pd.Timestamp("2025-01-01")
+        dau = raw["daily_active"].copy()
+        dau.rename(columns={"ActiveDate": "date", "EmpId": "emp_id"}, inplace=True) if "ActiveDate" in dau.columns else None
+        dau["date"] = pd.to_datetime(dau["date"], errors="coerce")
+        dau = dau[dau["date"] >= baseline]
 
-        # ------------------------------------------------------------------
-        # 啟用與留存
-        # ------------------------------------------------------------------
-        device_active["stat_month"] = device_active["first_install_date"].dt.to_period("M").dt.to_timestamp()
+        total_registered = int(dau["emp_id"].dropna().nunique())
+        if total_registered == 0:
+            retention_monthly_company = pd.DataFrame(
+                columns=["active_month", "active_users", "registered_total", "retention_rate"]
+            )
+        else:
+            monthly_active = (
+                dau.assign(active_month=dau["date"].dt.to_period("M").dt.to_timestamp())
+                .groupby("active_month")["emp_id"]
+                .nunique()
+                .reset_index(name="active_users")
+            )
+            monthly_active["registered_total"] = total_registered
+            monthly_active["retention_rate"] = monthly_active["active_users"] / monthly_active["registered_total"]
+            retention_monthly_company = monthly_active.sort_values("active_month")
 
-        activation_unit = (
-            device_active.groupby(["stat_month", "unit_id", "unit_name"], dropna=False)["emp_id"]
-            .nunique()
-            .reset_index(name="activated_users")
-        )
+        # --------------------------------------------------------------
+        # 6) 每週工作日訊息總計 + 人均訊息數（分母 = 該週在職聯集）
+        # --------------------------------------------------------------
+        msg_wd = messages[messages["date"].dt.weekday <= 4].copy()
+        if msg_wd.empty:
+            messages_weekly_total = pd.DataFrame(columns=["iso_year", "iso_week", "messages"])
+            messages_weekly_percapita = pd.DataFrame(
+                columns=["iso_year", "iso_week", "messages", "total_users", "messages_per_user"]
+            )
+        else:
+            iso = msg_wd["date"].dt.isocalendar()
+            msg_wd["iso_year"] = iso["year"].astype(int)
+            msg_wd["iso_week"] = iso["week"].astype(int)
 
-        daily_active["stat_month"] = daily_active["active_date"].dt.to_period("M").dt.to_timestamp()
-        retention_monthly = (
-            daily_active.groupby(["stat_month", "unit_id", "unit_name"], dropna=False)["emp_id"]
-            .nunique()
-            .reset_index(name="retained_users")
-        )
+            messages_weekly_total = (
+                msg_wd.groupby(["iso_year", "iso_week"])["emp_id"]
+                .size()
+                .reset_index(name="messages")
+                .sort_values(["iso_year", "iso_week"])
+            )
 
-        activation_summary = activation_unit.merge(
-            retention_monthly,
-            how="outer",
-            on=["stat_month", "unit_id", "unit_name"],
-        )
-        activation_summary["activated_users"] = activation_summary["activated_users"].fillna(0).astype(int)
-        activation_summary["retained_users"] = activation_summary["retained_users"].fillna(0).astype(int)
-        activation_summary = activation_summary.merge(
-            unit_counts[["unit_id", "unit_name", "total_users"]],
-            how="left",
-            on=["unit_id", "unit_name"],
-        )
-        activation_summary.rename(columns={"total_users": "total_employees"}, inplace=True)
-        activation_summary["total_employees"] = activation_summary["total_employees"].fillna(0).astype(int)
-        activation_summary["activation_rate"] = (
-            activation_summary["activated_users"]
-            / activation_summary["total_employees"].replace({0: pd.NA})
-        )
-        activation_summary["activation_rate"] = activation_summary["activation_rate"].fillna(0.0).astype(float)
-        activation_summary["retention_rate"] = (
-            activation_summary["retained_users"]
-            / activation_summary["activated_users"].replace({0: pd.NA})
-        )
-        activation_summary["retention_rate"] = activation_summary["retention_rate"].fillna(0.0).astype(float)
+            # 週在職聯集（依該週訊息實際出現的所有日期）
+            week_dates = msg_wd[["date", "iso_year", "iso_week"]].drop_duplicates()
 
-        company_activation = activation_summary.groupby("stat_month", as_index=False)[
-            ["activated_users", "retained_users", "total_employees"]
-        ].sum()
-        company_activation["activated_users"] = company_activation["activated_users"].astype(int)
-        company_activation["retained_users"] = company_activation["retained_users"].astype(int)
-        company_activation["total_employees"] = company_activation["total_employees"].astype(int)
-        company_activation["activation_rate"] = (
-            company_activation["activated_users"]
-            / company_activation["total_employees"].replace({0: pd.NA})
-        )
-        company_activation["activation_rate"] = company_activation["activation_rate"].fillna(0.0).astype(float)
-        company_activation["retention_rate"] = (
-            company_activation["retained_users"]
-            / company_activation["activated_users"].replace({0: pd.NA})
-        )
-        company_activation["retention_rate"] = company_activation["retention_rate"].fillna(0.0).astype(float)
-        company_activation["unit_id"] = None
-        company_activation["unit_name"] = "全公司"
+            percap_rows = []
+            for (by, bw), g in week_dates.groupby(["iso_year", "iso_week"]):
+                ds = list(pd.to_datetime(g["date"]).sort_values().unique())
+                in_service_ids = set()
+                for d in ds:
+                    mask = employed_on(d)
+                    in_service_ids |= set(employees.loc[mask, "emp_id"].dropna().astype(str))
+                total_users = len(in_service_ids)
+                msg_cnt = int(messages_weekly_total.query("iso_year==@by and iso_week==@bw")["messages"].sum())
+                percap_rows.append(
+                    {
+                        "iso_year": int(by),
+                        "iso_week": int(bw),
+                        "messages": msg_cnt,
+                        "total_users": total_users,
+                        "messages_per_user": (msg_cnt / total_users) if total_users else 0.0,
+                    }
+                )
+            messages_weekly_percapita = pd.DataFrame(percap_rows).sort_values(["iso_year", "iso_week"])
 
-        activation_all = pd.concat([activation_summary, company_activation], ignore_index=True)
-        activation_all["unit_name"].fillna("未定義", inplace=True)
-        activation_all = activation_all[
-            [
-                "stat_month",
-                "unit_id",
-                "unit_name",
-                "activated_users",
-                "retained_users",
-                "total_employees",
-                "activation_rate",
-                "retention_rate",
-            ]
-        ].sort_values(["stat_month", "unit_id"], na_position="last")
+        # --------------------------------------------------------------
+        # 7) 訊息分布 20/60/20（週）比例 + 趨勢
+        #   依週彙總每位使用者當週訊息數，做排名分層，輸出各分層訊息數占比
+        # --------------------------------------------------------------
+        if msg_wd.empty:
+            message_distribution = pd.DataFrame(
+                columns=["iso_year", "iso_week", "segment", "message_sum", "share_percent"]
+            )
+        else:
+            # 每人每週訊息數
+            per_user_week = (
+                msg_wd.groupby(["iso_year", "iso_week", "emp_id"])["emp_id"]
+                .size()
+                .reset_index(name="msg_count")
+            )
+
+            dist_rows = []
+            for (by, bw), g in per_user_week.groupby(["iso_year", "iso_week"]):
+                g = g.sort_values("msg_count", ascending=False).reset_index(drop=True)
+                total_users = len(g)
+                total_msgs = int(g["msg_count"].sum())
+                if total_users == 0 or total_msgs == 0:
+                    continue
+
+                top_n = max(int(round(total_users * 0.2)), 1)
+                mid_n = max(int(round(total_users * 0.6)), 0)
+                if top_n + mid_n > total_users:
+                    mid_n = max(total_users - top_n, 0)
+                bot_n = max(total_users - top_n - mid_n, 0)
+
+                top_sum = int(g.iloc[:top_n]["msg_count"].sum()) if top_n > 0 else 0
+                mid_sum = int(g.iloc[top_n : top_n + mid_n]["msg_count"].sum()) if mid_n > 0 else 0
+                bot_sum = int(g.iloc[top_n + mid_n :]["msg_count"].sum()) if bot_n > 0 else 0
+
+                for seg, s in (("前20%", top_sum), ("中間60%", mid_sum), ("後20%", bot_sum)):
+                    share = (s / total_msgs * 100.0) if total_msgs else 0.0
+                    dist_rows.append(
+                        {
+                            "iso_year": int(by),
+                            "iso_week": int(bw),
+                            "segment": seg,
+                            "message_sum": s,
+                            "share_percent": round(share, 2),
+                        }
+                    )
+            message_distribution = pd.DataFrame(dist_rows).sort_values(["iso_year", "iso_week", "segment"])
 
         return {
-            "usage_weekly": usage_all,
-            "daily_active": daily_company,
-            "message_daily": message_daily,
-            "message_distribution": message_distribution,
-            "message_leaderboard": leaderboard,
-            "activation_monthly": activation_all,
+            "coverage_company_weekly": coverage_company_weekly,
+            "coverage_unit_weekly": coverage_unit_weekly,
+            "active_rate_workingday_daily": active_rate_workingday_daily,
+            "activation_next_month_company": activation_next_month_company,
+            "retention_monthly_company": retention_monthly_company,
+            "messages_weekly_total": messages_weekly_total,
+            "messages_weekly_percapita": messages_weekly_percapita,
+            "message_distribution_weekly_20_60_20": message_distribution,
         }
 
     # ------------------------------------------------------------------
     # 載入階段
     # ------------------------------------------------------------------
-    def load(self, processed_items: Dict[str, pd.DataFrame]) -> None:
+    def load(self, items: Dict[str, pd.DataFrame]) -> None:
         """將彙總結果寫回 DuckDB。"""
-
         duck = self.duck_client
-        storage = settings.storage
 
+        # 1) 全公司覆蓋率（週）
         duck.ensure_table(
             f"""
-            CREATE TABLE IF NOT EXISTS {storage.user_daily_table} (
-                stat_date DATE,
+            CREATE TABLE IF NOT EXISTS {self.TBL_COVERAGE_COMPANY_WEEKLY} (
+                iso_year INTEGER,
+                iso_week INTEGER,
+                baseline_date DATE,
+                covered_users INTEGER,
+                total_users INTEGER,
+                coverage_rate DOUBLE
+            )
+            """
+        )
+        duck.write_dataframe(items["coverage_company_weekly"], self.TBL_COVERAGE_COMPANY_WEEKLY, mode="replace")
+
+        # 2) 各部門覆蓋率（週）
+        duck.ensure_table(
+            f"""
+            CREATE TABLE IF NOT EXISTS {self.TBL_COVERAGE_UNIT_WEEKLY} (
+                iso_year INTEGER,
+                iso_week INTEGER,
+                baseline_date DATE,
+                root_org_id VARCHAR,
+                root_org_name VARCHAR,
+                used_users INTEGER,
+                total_users INTEGER,
+                coverage_rate DOUBLE
+            )
+            """
+        )
+        # 確保 baseline_date 欄位存在（transform 已處理，保險再填）
+        df_unit = items["coverage_unit_weekly"].copy()
+        if "baseline_date" not in df_unit.columns:
+            df_unit["baseline_date"] = pd.NaT
+        duck.write_dataframe(df_unit, self.TBL_COVERAGE_UNIT_WEEKLY, mode="replace")
+
+        # 3) 工作日活躍（日）
+        duck.ensure_table(
+            f"""
+            CREATE TABLE IF NOT EXISTS {self.TBL_ACTIVE_RATE_WORKINGDAY_DAILY} (
+                date DATE,
                 active_users INTEGER,
                 total_users INTEGER,
                 active_rate DOUBLE
             )
             """
         )
-        duck.write_dataframe(processed_items["daily_active"], storage.user_daily_table, mode="replace")
+        duck.write_dataframe(items["active_rate_workingday_daily"], self.TBL_ACTIVE_RATE_WORKINGDAY_DAILY, mode="replace")
 
+        # 4) 當月啟用率（公司）
         duck.ensure_table(
             f"""
-            CREATE TABLE IF NOT EXISTS {storage.message_table} (
-                stat_date DATE,
-                total_messages INTEGER,
+            CREATE TABLE IF NOT EXISTS {self.TBL_ACTIVATION_NEXT_MONTH} (
+                hire_month DATE,
+                new_hires INTEGER,
+                used_next_month INTEGER,
+                activation_rate DOUBLE
+            )
+            """
+        )
+        duck.write_dataframe(items["activation_next_month_company"], self.TBL_ACTIVATION_NEXT_MONTH, mode="replace")
+
+        # 5) 當月留存率（公司）
+        duck.ensure_table(
+            f"""
+            CREATE TABLE IF NOT EXISTS {self.TBL_RETENTION_MONTHLY} (
+                active_month DATE,
                 active_users INTEGER,
-                avg_messages_per_user DOUBLE,
-                total_employees INTEGER
-            )
-            """
-        )
-        duck.write_dataframe(processed_items["message_daily"], storage.message_table, mode="replace")
-
-        duck.ensure_table(
-            """
-            CREATE TABLE IF NOT EXISTS usage_rate_weekly (
-                stat_date DATE,
-                iso_year INTEGER,
-                iso_week INTEGER,
-                week_label VARCHAR,
-                scope VARCHAR,
-                scope_id VARCHAR,
-                unit_id VARCHAR,
-                unit_name VARCHAR,
-                active_users INTEGER,
-                total_users INTEGER,
-                usage_rate DOUBLE
-            )
-            """
-        )
-        duck.write_dataframe(processed_items["usage_weekly"], "usage_rate_weekly", mode="replace")
-
-        duck.ensure_table(
-            """
-            CREATE TABLE IF NOT EXISTS message_distribution_20_60_20 (
-                stat_date DATE,
-                segment VARCHAR,
-                user_share DOUBLE,
-                message_share DOUBLE,
-                user_count INTEGER
-            )
-            """
-        )
-        duck.write_dataframe(processed_items["message_distribution"], "message_distribution_20_60_20", mode="replace")
-
-        duck.ensure_table(
-            """
-            CREATE TABLE IF NOT EXISTS message_leaderboard (
-                rank INTEGER,
-                emp_no VARCHAR,
-                unit_id VARCHAR,
-                unit_name VARCHAR,
-                total_messages INTEGER
-            )
-            """
-        )
-        duck.write_dataframe(processed_items["message_leaderboard"], "message_leaderboard", mode="replace")
-
-        duck.ensure_table(
-            """
-            CREATE TABLE IF NOT EXISTS activation_monthly (
-                stat_month DATE,
-                unit_id VARCHAR,
-                unit_name VARCHAR,
-                activated_users INTEGER,
-                retained_users INTEGER,
-                total_employees INTEGER,
-                activation_rate DOUBLE,
+                registered_total INTEGER,
                 retention_rate DOUBLE
             )
             """
         )
-        duck.write_dataframe(processed_items["activation_monthly"], "activation_monthly", mode="replace")
+        duck.write_dataframe(items["retention_monthly_company"], self.TBL_RETENTION_MONTHLY, mode="replace")
 
+        # 6) 每週工作日訊息總計
+        duck.ensure_table(
+            f"""
+            CREATE TABLE IF NOT EXISTS {self.TBL_MSG_WEEKLY_TOTAL} (
+                iso_year INTEGER,
+                iso_week INTEGER,
+                messages INTEGER
+            )
+            """
+        )
+        duck.write_dataframe(items["messages_weekly_total"], self.TBL_MSG_WEEKLY_TOTAL, mode="replace")
+
+        # 7) 每週工作日人均訊息數
+        duck.ensure_table(
+            f"""
+            CREATE TABLE IF NOT EXISTS {self.TBL_MSG_WEEKLY_PERCAPITA} (
+                iso_year INTEGER,
+                iso_week INTEGER,
+                messages INTEGER,
+                total_users INTEGER,
+                messages_per_user DOUBLE
+            )
+            """
+        )
+        duck.write_dataframe(items["messages_weekly_percapita"], self.TBL_MSG_WEEKLY_PERCAPITA, mode="replace")
+
+        # 8) 訊息分布 20/60/20（週）
+        duck.ensure_table(
+            f"""
+            CREATE TABLE IF NOT EXISTS {self.TBL_MSG_DISTRIBUTION} (
+                iso_year INTEGER,
+                iso_week INTEGER,
+                segment VARCHAR,
+                message_sum INTEGER,
+                share_percent DOUBLE
+            )
+            """
+        )
+        duck.write_dataframe(
+            items["message_distribution_weekly_20_60_20"], self.TBL_MSG_DISTRIBUTION, mode="replace"
+        )
