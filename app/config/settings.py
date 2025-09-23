@@ -107,7 +107,10 @@ def _env(key: str, default: Any) -> Any:
 def _apply_env_overrides(cfg: Dict[str, Any]) -> Dict[str, Any]:
     # storage
     storage = cfg.setdefault("storage", {})
-    storage["duckdb_path"] = _env("DUCKDB_PATH", storage.get("duckdb_path"))
+    storage_defaults = StorageSettings()
+    storage.setdefault("duckdb_path", storage_defaults.duckdb_path)
+    storage.setdefault("duckdb_lib_path", storage_defaults.duckdb_lib_path)
+    storage["duckdb_path"] = _env("DUCKDB_PATH", storage["duckdb_path"])
     storage["duckdb_lib_path"] = _env("DUCKDB_LIB_PATH", storage.get("duckdb_lib_path"))
 
     # api

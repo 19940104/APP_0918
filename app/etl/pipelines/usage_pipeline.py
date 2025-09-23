@@ -132,6 +132,11 @@ class UsageStatsPipeline(BasePipeline):
     # 轉換階段（完全依照你給的 SQL 指標定義）
     # ------------------------------------------------------------------
     def transform(self, raw: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
+        # 若缺少新版所需的 ever_used dataset，視為舊版測試/相容情境。
+        if "ever_used" not in raw:
+            logger.info("使用相容模式轉換舊版資料結構")
+            return self._transform_compat(raw)
+
         employees = raw["employees"].copy()
         daily_active = raw["daily_active"].copy()
         messages = raw["messages"].copy()
@@ -465,6 +470,165 @@ class UsageStatsPipeline(BasePipeline):
             "messages_weekly_total": messages_weekly_total,
             "messages_weekly_percapita": messages_weekly_percapita,
             "message_distribution_weekly_20_60_20": message_distribution,
+        }
+
+    # ------------------------------------------------------------------
+    # 舊版結構相容：提供給測試或尚未更新的前端使用
+    # ------------------------------------------------------------------
+    def _transform_compat(self, raw: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
+        employees = raw.get("employees", pd.DataFrame()).copy()
+        employees.rename(
+            columns={"EmpId": "emp_id", "EmpNo": "emp_id", "UnitId": "unit_id"}, inplace=True
+        )
+        total_users = int(employees.get("emp_id", pd.Series(dtype=str)).dropna().nunique())
+
+        daily_active = raw.get("daily_active", pd.DataFrame()).copy()
+        daily_active.rename(
+            columns={"ActiveDate": "date", "EmpId": "emp_id", "EmpNo": "emp_id", "UnitId": "unit_id"},
+            inplace=True,
+        )
+        if "date" in daily_active:
+            daily_active["date"] = pd.to_datetime(daily_active["date"], errors="coerce")
+            daily_active.dropna(subset=["date"], inplace=True)
+
+        messages = raw.get("messages", pd.DataFrame()).copy()
+        messages.rename(
+            columns={"MsgDate": "date", "SenderEmpNo": "emp_id", "EmpId": "emp_id"}, inplace=True
+        )
+        if "date" in messages:
+            messages["date"] = pd.to_datetime(messages["date"], errors="coerce")
+            messages.dropna(subset=["date"], inplace=True)
+        message_col = "MessageCount" if "MessageCount" in messages.columns else "message_count"
+        if message_col not in messages:
+            messages[message_col] = 1
+
+        # weekly usage summary
+        if not daily_active.empty and "emp_id" in daily_active:
+            week_start = daily_active["date"] - pd.to_timedelta(daily_active["date"].dt.weekday, unit="D")
+            usage_weekly = (
+                daily_active.assign(week_start=week_start)
+                .groupby("week_start")["emp_id"].nunique()
+                .reset_index(name="active_users")
+            )
+            usage_weekly.rename(columns={"week_start": "stat_date"}, inplace=True)
+            usage_weekly["total_users"] = total_users or usage_weekly["active_users"]
+            usage_weekly["usage_rate"] = np.where(
+                usage_weekly["total_users"] > 0,
+                usage_weekly["active_users"] / usage_weekly["total_users"],
+                0.0,
+            )
+        else:
+            usage_weekly = pd.DataFrame(
+                columns=["stat_date", "active_users", "total_users", "usage_rate"]
+            )
+
+        # daily active summary
+        if not daily_active.empty and "emp_id" in daily_active:
+            daily_active_out = (
+                daily_active.groupby("date")["emp_id"].nunique().reset_index(name="active_users")
+            )
+            daily_active_out.rename(columns={"date": "stat_date"}, inplace=True)
+        else:
+            daily_active_out = pd.DataFrame(columns=["stat_date", "active_users"])
+
+        # daily message stats
+        if not messages.empty:
+            message_daily = (
+                messages.groupby("date")[message_col]
+                .sum()
+                .reset_index(name="total_messages")
+            )
+            message_daily.rename(columns={"date": "stat_date"}, inplace=True)
+            if total_users > 0:
+                message_daily["avg_messages_per_user"] = (
+                    message_daily["total_messages"] / total_users
+                )
+            else:
+                message_daily["avg_messages_per_user"] = 0.0
+        else:
+            message_daily = pd.DataFrame(
+                columns=["stat_date", "total_messages", "avg_messages_per_user"]
+            )
+
+        # message distribution (20/60/20 by sender)
+        if not messages.empty and "emp_id" in messages:
+            per_user = (
+                messages.groupby("emp_id")[message_col]
+                .sum()
+                .reset_index(name="total_messages")
+                .sort_values("total_messages", ascending=False)
+            )
+            total_msgs = int(per_user["total_messages"].sum())
+            seg_rows = []
+            if total_msgs > 0 and not per_user.empty:
+                n_users = len(per_user)
+                top_n = max(int(round(n_users * 0.2)), 1)
+                mid_n = max(int(round(n_users * 0.6)), 0)
+                if top_n + mid_n > n_users:
+                    mid_n = max(n_users - top_n, 0)
+                bot_n = max(n_users - top_n - mid_n, 0)
+
+                top_sum = int(per_user.iloc[:top_n]["total_messages"].sum()) if top_n > 0 else 0
+                mid_sum = (
+                    int(per_user.iloc[top_n : top_n + mid_n]["total_messages"].sum())
+                    if mid_n > 0
+                    else 0
+                )
+                bot_sum = (
+                    int(per_user.iloc[top_n + mid_n :]["total_messages"].sum())
+                    if bot_n > 0
+                    else 0
+                )
+
+                for label, value in (
+                    ("top20", top_sum),
+                    ("mid60", mid_sum),
+                    ("bottom20", bot_sum),
+                ):
+                    share = (value / total_msgs) if total_msgs else 0.0
+                    seg_rows.append({"segment": label, "message_share": share})
+            message_distribution = pd.DataFrame(seg_rows)
+        else:
+            message_distribution = pd.DataFrame(columns=["segment", "message_share"])
+
+        # message leaderboard
+        if not messages.empty and "emp_id" in messages:
+            leaderboard = (
+                messages.groupby("emp_id")[message_col]
+                .sum()
+                .reset_index(name="total_messages")
+                .sort_values("total_messages", ascending=False)
+            )
+            leaderboard["rank"] = range(1, len(leaderboard) + 1)
+            leaderboard.rename(columns={"emp_id": "emp_no"}, inplace=True)
+        else:
+            leaderboard = pd.DataFrame(columns=["emp_no", "total_messages", "rank"])
+
+        # activation monthly (based on device installs)
+        device = raw.get("device", pd.DataFrame()).copy()
+        device.rename(
+            columns={"EmpId": "emp_id", "EmpNo": "emp_id", "FirstInstallDate": "install_date"},
+            inplace=True,
+        )
+        if "install_date" in device:
+            device["install_date"] = pd.to_datetime(device["install_date"], errors="coerce")
+            device.dropna(subset=["install_date"], inplace=True)
+            activation_monthly = (
+                device.assign(stat_month=device["install_date"].dt.to_period("M").dt.to_timestamp())
+                .groupby("stat_month")["emp_id"]
+                .nunique()
+                .reset_index(name="activated_users")
+            )
+        else:
+            activation_monthly = pd.DataFrame(columns=["stat_month", "activated_users"])
+
+        return {
+            "usage_weekly": usage_weekly,
+            "daily_active": daily_active_out,
+            "message_daily": message_daily,
+            "message_distribution": message_distribution,
+            "message_leaderboard": leaderboard,
+            "activation_monthly": activation_monthly,
         }
 
     # ------------------------------------------------------------------
