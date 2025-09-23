@@ -51,6 +51,8 @@ class StorageSettings(BaseModel):
     """儲存層設定（DuckDB）。"""
     duckdb_path: str = "./data/duck_cache.duckdb"
     duckdb_lib_path: Optional[str] = None
+    message_table: str = "message_aggregate_daily"
+    user_daily_table: str = "user_active_daily"
 
 
 class ETLTimetable(BaseModel):
@@ -110,8 +112,12 @@ def _apply_env_overrides(cfg: Dict[str, Any]) -> Dict[str, Any]:
     storage_defaults = StorageSettings()
     storage.setdefault("duckdb_path", storage_defaults.duckdb_path)
     storage.setdefault("duckdb_lib_path", storage_defaults.duckdb_lib_path)
+    storage.setdefault("message_table", storage_defaults.message_table)
+    storage.setdefault("user_daily_table", storage_defaults.user_daily_table)
     storage["duckdb_path"] = _env("DUCKDB_PATH", storage["duckdb_path"])
     storage["duckdb_lib_path"] = _env("DUCKDB_LIB_PATH", storage.get("duckdb_lib_path"))
+    storage["message_table"] = _env("STORAGE_MESSAGE_TABLE", storage["message_table"])
+    storage["user_daily_table"] = _env("STORAGE_USER_DAILY_TABLE", storage["user_daily_table"])
 
     # api
     api = cfg.setdefault("api", {})
