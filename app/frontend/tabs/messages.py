@@ -1,4 +1,4 @@
-"""Message analytics tab."""
+"""訊息量統計"""
 
 from __future__ import annotations
 

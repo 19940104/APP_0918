@@ -1,4 +1,4 @@
-"""Activation and Retention Analytics Tab (安全版，模組化)."""
+"""人員啟用率與留存率"""
 
 from __future__ import annotations
 import pandas as pd

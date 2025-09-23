@@ -1,10 +1,11 @@
 """
-Usage Analytics Tab (安全版)。
+人員覆蓋率統計
 
 此模組負責繪製「使用率分析」分頁，包含：
 1. 全公司週使用率
-   - 提供月份篩選
+   - 提供月 / 季 / 年篩選
    - 圖表 (左) + 資料表 (右)，左右擺放
+   - 圖表為柱狀圖 + 折線圖
 2. 各部門週使用率
    - 提供週次篩選
    - 支援圖表類型切換 (圓餅圖 / 長條圖)
@@ -50,7 +51,7 @@ def render_usage() -> None:
     cols = st.columns(2, gap="large")
 
     # =========================================================================
-    # 全公司週使用率
+    # 全公司週使用率 (月/季/年切換 + 柱狀 + 折線)
     # =========================================================================
     if company:
         company_df = pd.DataFrame(company)
@@ -65,55 +66,67 @@ def render_usage() -> None:
                 company_df = company_df.sort_values(sort_keys)
 
             # 顯示週次
-            if "week_label" in company_df.columns:
-                company_df["week_display"] = company_df["week_label"].copy()
-            else:
-                company_df["week_display"] = pd.Series([None] * len(company_df))
-
-            if "stat_date" in company_df.columns:
-                company_df["week_display"] = company_df["week_display"].fillna(
-                    company_df["stat_date"].dt.strftime("%G-W%V")
-                )
-                company_df["stat_month"] = company_df["stat_date"].dt.to_period("M")
-            else:
-                company_df["stat_month"] = pd.Series([pd.NaT] * len(company_df))
-
-            company_df["week_display"] = company_df["week_display"].fillna(
-                company_df.index.to_series().add(1).map(lambda idx: f"週次 {idx}")
+            company_df["week_display"] = (
+                company_df["week_label"]
+                if "week_label" in company_df.columns
+                else company_df["stat_date"].dt.strftime("%G-W%V")
+                if "stat_date" in company_df.columns
+                else company_df.index.to_series().add(1).map(lambda idx: f"週次 {idx}")
             )
-            company_df["week_display"] = company_df["week_display"].astype(str)
+
+            # 時間週期欄位
+            if "stat_date" in company_df.columns:
+                company_df["stat_month"] = company_df["stat_date"].dt.to_period("M")
+                company_df["stat_quarter"] = company_df["stat_date"].dt.to_period("Q")
+                company_df["stat_year"] = company_df["stat_date"].dt.to_period("Y")
+            else:
+                company_df["stat_month"] = pd.NaT
+                company_df["stat_quarter"] = pd.NaT
+                company_df["stat_year"] = pd.NaT
+
             company_df["usage_rate_display"] = company_df["usage_rate"].apply(
                 lambda v: f"{v:.1%}" if pd.notna(v) else "無資料"
             )
-
-            # 月份篩選選項
-            month_options: list[str] = []
-            if "stat_month" in company_df.columns:
-                unique_months = company_df["stat_month"].dropna().unique()
-                if len(unique_months) > 0:
-                    month_options = sorted([str(month) for month in unique_months], reverse=True)
 
             with cols[0]:
                 st.markdown(
                     info_badge("全公司週使用率", CHART_TOOLTIPS.get("company_usage"), font_size="18px"),
                     unsafe_allow_html=True,
                 )
-                display_df = company_df
-                if month_options:
-                    selected_month = st.selectbox(
-                        "選擇月份檢視週使用率",
-                        month_options,
-                        index=0,
-                        key="company_usage_month_select",
-                    )
-                    display_df = company_df[company_df["stat_month"].astype(str) == selected_month]
+
+                # 篩選模式
+                filter_mode = st.radio(
+                    "篩選方式",
+                    ["月", "季", "年"],
+                    index=0,
+                    horizontal=True,
+                    key="company_usage_filter_mode",
+                )
+
+                # 選單選項
+                if filter_mode == "月":
+                    options = sorted(company_df["stat_month"].dropna().unique(), reverse=True)
+                    options = [str(o) for o in options]
+                    selected = st.selectbox("選擇月份", options, key="company_usage_month_select")
+                    display_df = company_df[company_df["stat_month"].astype(str) == selected]
+                elif filter_mode == "季":
+                    options = sorted(company_df["stat_quarter"].dropna().unique(), reverse=True)
+                    options = [str(o) for o in options]
+                    selected = st.selectbox("選擇季度", options, key="company_usage_quarter_select")
+                    display_df = company_df[company_df["stat_quarter"].astype(str) == selected]
+                else:  # 年
+                    options = sorted(company_df["stat_year"].dropna().unique(), reverse=True)
+                    options = [str(o) for o in options]
+                    selected = st.selectbox("選擇年份", options, key="company_usage_year_select")
+                    display_df = company_df[company_df["stat_year"].astype(str) == selected]
 
                 if not display_df.empty:
                     display_df = display_df.dropna(subset=["usage_rate"])
                     if display_df.empty:
                         st.info("⚠️ 沒有有效的使用率資料")
                     else:
-                        fig = px.bar(
+                        # 柱狀圖
+                        fig_bar = px.bar(
                             display_df,
                             x="week_display",
                             y="usage_rate",
@@ -125,15 +138,27 @@ def render_usage() -> None:
                             },
                             labels={"week_display": "ISO 週次", "usage_rate": "使用率"},
                         )
-                        fig.update_traces(textposition="outside")
-                        fig.update_layout(title=None, xaxis_title="ISO 週次", yaxis_title="使用率 (%)")
-                        fig.update_yaxes(tickformat=".0%")
+                        fig_bar.update_traces(textposition="outside")
+
+                        # 折線圖
+                        fig_line = px.line(
+                            display_df,
+                            x="week_display",
+                            y="usage_rate",
+                            markers=True,
+                        )
+
+                        for trace in fig_line.data:
+                            fig_bar.add_trace(trace)
+
+                        fig_bar.update_layout(title=None, xaxis_title="ISO 週次", yaxis_title="使用率 (%)")
+                        fig_bar.update_yaxes(tickformat=".0%")
 
                         # ---- 左右擺放 (圖表 | 表格) ----
                         chart_col, table_col = st.columns([2, 1], gap="medium")
                         with chart_col:
                             st.plotly_chart(
-                                fig,
+                                fig_bar,
                                 use_container_width=True,
                                 config={
                                     "modeBarButtonsToKeep": ["toImage", "pan2d", "toggleFullscreen"],
@@ -159,13 +184,13 @@ def render_usage() -> None:
                                 else:
                                     st.info("⚠️ 無表格資料")
                 else:
-                    st.info("所選月份沒有週使用率資料")
+                    st.info(f"所選{filter_mode}沒有週使用率資料")
         else:
             with cols[0]:
                 st.info("全公司週使用率沒有資料。")
 
     # =========================================================================
-    # 各部門週使用率
+    # 各部門週使用率 
     # =========================================================================
     dept_df = pd.DataFrame(departments) if isinstance(departments, list) else pd.DataFrame()
     if not dept_df.empty:
@@ -274,43 +299,48 @@ def render_usage() -> None:
                                 },
                             )
                         with table_col:
-                            if not week_df.empty:
-                                table_df = week_df.copy()
-                                table_df["usage_rate_pct"] = table_df["usage_rate"] * 100
-                                table_df["usage_rate_label"] = table_df["usage_rate_pct"].map(
-                                    lambda v: f"{v:.2f}%" if pd.notna(v) else "無資料"
-                                )
-                                for col in ["active_users", "total_users"]:
-                                    if col in table_df.columns:
-                                        table_df[col] = (
-                                            pd.to_numeric(table_df[col], errors="coerce").astype("Int64")
-                                        )
-                                display_cols = []
-                                rename_map = {}
-                                if "unit_id" in table_df.columns:
-                                    display_cols.append("unit_id")
-                                    rename_map["unit_id"] = "處級代碼"
-                                if "unit_name" in table_df.columns:
-                                    display_cols.append("unit_name")
-                                    rename_map["unit_name"] = "處級名稱"
-                                if "total_users" in table_df.columns:
-                                    display_cols.append("total_users")
-                                    rename_map["total_users"] = "總人數"
-                                if "active_users" in table_df.columns:
-                                    display_cols.append("active_users")
-                                    rename_map["active_users"] = "使用人數"
-                                if "usage_rate_label" in table_df.columns:
-                                    display_cols.append("usage_rate_label")
-                                    rename_map["usage_rate_label"] = "使用率百分比"
-
-                                if display_cols:
-                                    st.dataframe(
-                                        table_df[display_cols].rename(columns=rename_map),
-                                        use_container_width=True,
-                                        hide_index=True,
+                            try:
+                                if not week_df.empty:
+                                    table_df = week_df.copy()
+                                    table_df["usage_rate_pct"] = table_df["usage_rate"] * 100
+                                    table_df["usage_rate_label"] = table_df["usage_rate_pct"].map(
+                                        lambda v: f"{v:.2f}%" if pd.notna(v) else "無資料"
                                     )
+                                    for col in ["active_users", "total_users"]:
+                                        if col in table_df.columns:
+                                            table_df[col] = (
+                                                pd.to_numeric(table_df[col], errors="coerce").astype("Int64")
+                                            )
+                                    display_cols = []
+                                    rename_map = {}
+                                    if "unit_id" in table_df.columns:
+                                        display_cols.append("unit_id")
+                                        rename_map["unit_id"] = "處級代碼"
+                                    if "unit_name" in table_df.columns:
+                                        display_cols.append("unit_name")
+                                        rename_map["unit_name"] = "處級名稱"
+                                    if "total_users" in table_df.columns:
+                                        display_cols.append("total_users")
+                                        rename_map["total_users"] = "總人數"
+                                    if "active_users" in table_df.columns:
+                                        display_cols.append("active_users")
+                                        rename_map["active_users"] = "使用人數"
+                                    if "usage_rate_label" in table_df.columns:
+                                        display_cols.append("usage_rate_label")
+                                        rename_map["usage_rate_label"] = "使用率百分比"
+
+                                    if display_cols:
+                                        st.dataframe(
+                                            table_df[display_cols].rename(columns=rename_map),
+                                            use_container_width=True,
+                                            hide_index=True,
+                                        )
+                                    else:
+                                        st.info("⚠️ 無表格資料")
                                 else:
-                                    st.info("⚠️ 無表格資料")
+                                    st.info("⚠️ 所選週次沒有資料")
+                            except Exception:
+                                st.info("📊 表格載入中…")
                     else:
                         st.info("⚠️ 所選週次缺少使用率資料")
                 else:
@@ -320,3 +350,4 @@ def render_usage() -> None:
     else:
         with cols[1]:
             st.info("各部門週使用率沒有資料。")
+

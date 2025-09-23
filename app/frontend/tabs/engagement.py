@@ -1,4 +1,4 @@
-"""Engagement analytics tab."""
+"""人員黏著度統計"""
 
 from __future__ import annotations
 

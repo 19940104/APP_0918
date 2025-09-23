@@ -108,18 +108,25 @@ def render_overview() -> None:
 # =============================================================================
 render_overview()
 
-usage_tab, message_tab, engagement_tab, activation_tab = st.tabs(
-    ["使用人數分析", "訊息量分析", "黏著度分析", "啟用與留存"]
+tab1, tab2, tab3, tab4= st.tabs(
+    [
+        "人員覆蓋率統計",
+        "人員黏著度統計",
+        "人員啟用率與留存率",
+        "訊息量統計",
+    ]
 )
 
-with usage_tab:
-    render_usage()
-with message_tab:
-    render_messages()
-with engagement_tab:
-    render_engagement()
-with activation_tab:
-    render_activation()
+with tab1:
+    render_usage()  
+with tab2:
+    render_engagement()  
+with tab3:
+    render_activation()  
+with tab4:
+    render_messages()  
+
+
 
 # =============================================================================
 # 更新時間
